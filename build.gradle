@@ -1,0 +1,36 @@
+plugins {
+    id 'java'
+    id 'com.gradleup.shadow' version '9.4.2'
+}
+
+group = 'com.workflowscanner'
+version = '1.0.0'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    compileOnly 'net.portswigger.burp.extensions:montoya-api:2025.5'
+    implementation 'com.google.code.gson:gson:2.11.0'
+}
+
+shadowJar {
+    archiveBaseName.set('workflow-vuln-scanner')
+    archiveClassifier.set('')
+    archiveVersion.set(project.version)
+
+    // Montoya API is provided by Burp at runtime
+    dependencies {
+        exclude(dependency('net.portswigger.burp.extensions:montoya-api'))
+    }
+}
+
+tasks.named('build') {
+    dependsOn shadowJar
+}

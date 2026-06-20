@@ -1,0 +1,256 @@
+package com.workflowscanner.graph;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Queue;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+
+/**
+ * The core request graph data structure.
+ * Thread-safe for concurrent reads (UI, analysis) and writes (graph builder).
+ * Supports chain detection, filtering, and statistics.
+ */
+public class RequestGraph {
+
+    private final Map<String, RequestNode> nodes = new ConcurrentHashMap<>();
+    private final List<RequestEdge> edges = new CopyOnWriteArrayList<>();
+    private volatile int nextNodeIndex = 0;
+
+    // Adjacency lists for efficient traversal
+    private final Map<String, List<String>> outgoing = new ConcurrentHashMap<>(); // nodeId -> [targetIds]
+    private final Map<String, List<String>> incoming = new ConcurrentHashMap<>(); // nodeId -> [sourceIds]
+
+    // --- Node Operations ---
+
+    public synchronized RequestNode addNode(RequestNode node) {
+        nodes.put(node.getId(), node);
+        outgoing.putIfAbsent(node.getId(), new CopyOnWriteArrayList<>());
+        incoming.putIfAbsent(node.getId(), new CopyOnWriteArrayList<>());
+        return node;
+    }
+
+    public void addEdge(RequestEdge edge) {
+        edges.add(edge);
+        outgoing.computeIfAbsent(edge.getSourceNodeId(), k -> new CopyOnWriteArrayList<>())
+                .add(edge.getTargetNodeId());
+        incoming.computeIfAbsent(edge.getTargetNodeId(), k -> new CopyOnWriteArrayList<>())
+                .add(edge.getSourceNodeId());
+    }
+
+    public RequestNode getNode(String nodeId) {
+        return nodes.get(nodeId);
+    }
+
+    public Map<String, RequestNode> getNodes() {
+        return Collections.unmodifiableMap(nodes);
+    }
+
+    public List<RequestEdge> getEdges() {
+        return Collections.unmodifiableList(edges);
+    }
+
+    // --- Filtering ---
+
+    public List<RequestNode> getNodesByHost(String host) {
+        List<RequestNode> result = new ArrayList<>();
+        for (RequestNode node : nodes.values()) {
+            if (host != null && host.equalsIgnoreCase(node.getHost())) {
+                result.add(node);
+            }
+        }
+        return result;
+    }
+
+    public List<RequestNode> getNodesByPath(String pathPattern) {
+        Pattern pattern = Pattern.compile(pathPattern, Pattern.CASE_INSENSITIVE);
+        List<RequestNode> result = new ArrayList<>();
+        for (RequestNode node : nodes.values()) {
+            if (node.getPath() != null && pattern.matcher(node.getPath()).find()) {
+                result.add(node);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Get all edges connected to a specific node (incoming + outgoing).
+     */
+    public List<RequestEdge> getEdgesForNode(String nodeId) {
+        List<RequestEdge> result = new ArrayList<>();
+        for (RequestEdge edge : edges) {
+            if (nodeId.equals(edge.getSourceNodeId()) || nodeId.equals(edge.getTargetNodeId())) {
+                result.add(edge);
+            }
+        }
+        return result;
+    }
+
+    // --- Chain Detection (Connected Components via BFS) ---
+
+    /**
+     * Detect all workflow chains (connected subgraphs).
+     * Each chain is a list of nodes sorted by timestamp.
+     */
+    public List<List<RequestNode>> getWorkflowChains() {
+        Set<String> visited = new HashSet<>();
+        List<List<RequestNode>> chains = new ArrayList<>();
+
+        for (String nodeId : nodes.keySet()) {
+            if (visited.contains(nodeId)) continue;
+
+            // BFS to find connected component
+            List<RequestNode> chain = new ArrayList<>();
+            Queue<String> queue = new LinkedList<>();
+            queue.add(nodeId);
+            visited.add(nodeId);
+
+            while (!queue.isEmpty()) {
+                String current = queue.poll();
+                RequestNode node = nodes.get(current);
+                if (node != null) {
+                    chain.add(node);
+                }
+
+                // Follow outgoing edges
+                List<String> targets = outgoing.get(current);
+                if (targets != null) {
+                    for (String target : targets) {
+                        if (visited.add(target)) {
+                            queue.add(target);
+                        }
+                    }
+                }
+
+                // Follow incoming edges
+                List<String> sources = incoming.get(current);
+                if (sources != null) {
+                    for (String source : sources) {
+                        if (visited.add(source)) {
+                            queue.add(source);
+                        }
+                    }
+                }
+            }
+
+            // Sort chain by timestamp
+            chain.sort(Comparator.comparingLong(RequestNode::getTimestamp));
+
+            if (chain.size() > 1) { // Only include chains with 2+ nodes
+                chains.add(chain);
+            }
+        }
+
+        // Sort chains by size (largest first)
+        chains.sort((a, b) -> Integer.compare(b.size(), a.size()));
+        return chains;
+    }
+
+    /**
+     * Get the full chain containing a specific node.
+     */
+    public List<RequestNode> getChainForNode(String nodeId) {
+        for (List<RequestNode> chain : getWorkflowChains()) {
+            for (RequestNode node : chain) {
+                if (node.getId().equals(nodeId)) {
+                    return chain;
+                }
+            }
+        }
+        return Collections.emptyList();
+    }
+
+    /**
+     * Get all unique hosts in the graph.
+     */
+    public Set<String> getAllHosts() {
+        Set<String> hosts = new HashSet<>();
+        for (RequestNode node : nodes.values()) {
+            if (node.getHost() != null && !node.getHost().isEmpty()) {
+                hosts.add(node.getHost());
+            }
+        }
+        return hosts;
+    }
+
+    // --- Merge ---
+
+    /**
+     * Merge another graph into this one (e.g., backfill data into live graph).
+     */
+    public void merge(RequestGraph other) {
+        for (RequestNode node : other.nodes.values()) {
+            if (!nodes.containsKey(node.getId())) {
+                addNode(node);
+            }
+        }
+        for (RequestEdge edge : other.edges) {
+            addEdge(edge);
+        }
+    }
+
+    // --- Statistics ---
+
+    public int getNodeCount() { return nodes.size(); }
+    public int getEdgeCount() { return edges.size(); }
+
+    public int getChainCount() {
+        return getWorkflowChains().size();
+    }
+
+    public synchronized int getNextNodeIndex() {
+        return nextNodeIndex++;
+    }
+
+    public GraphStats getStats() {
+        List<List<RequestNode>> chains = getWorkflowChains();
+        int maxChainLength = chains.isEmpty() ? 0 : chains.get(0).size();
+        return new GraphStats(nodes.size(), edges.size(), chains.size(),
+                maxChainLength, getAllHosts().size());
+    }
+
+    /**
+     * Clear all graph data.
+     */
+    public synchronized void clear() {
+        nodes.clear();
+        edges.clear();
+        outgoing.clear();
+        incoming.clear();
+        nextNodeIndex = 0;
+    }
+
+    // --- Stats Record ---
+
+    public static class GraphStats {
+        public final int nodeCount;
+        public final int edgeCount;
+        public final int chainCount;
+        public final int maxChainLength;
+        public final int hostCount;
+
+        public GraphStats(int nodeCount, int edgeCount, int chainCount,
+                          int maxChainLength, int hostCount) {
+            this.nodeCount = nodeCount;
+            this.edgeCount = edgeCount;
+            this.chainCount = chainCount;
+            this.maxChainLength = maxChainLength;
+            this.hostCount = hostCount;
+        }
+
+        @Override
+        public String toString() {
+            return String.format("Nodes: %d, Edges: %d, Chains: %d, Max chain: %d, Hosts: %d",
+                    nodeCount, edgeCount, chainCount, maxChainLength, hostCount);
+        }
+    }
+}
