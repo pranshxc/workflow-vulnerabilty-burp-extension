@@ -6,16 +6,24 @@ import burp.api.montoya.scanner.audit.issues.AuditIssueSeverity;
 /**
  * Maps vulnerability types and validation status to Burp severity and confidence.
  *
+ * <p><b>Validation rework:</b> the {@code validated} parameter is now
+ * driven by strict proof level (CONFIRMED only) from
+ * {@link com.workflowscanner.validation.ValidationResult}. Findings that
+ * are only PROBABLE (response similarity without business-effect proof)
+ * get downgraded severity and confidence so they do not flood Burp as
+ * high-severity false positives.
+ *
  * | Vulnerability Type          | Validated | Severity | Confidence |
  * |-----------------------------|-----------|----------|------------|
  * | Step skipping (financial)   | Yes       | HIGH     | CERTAIN    |
- * | Step skipping (financial)   | No        | HIGH     | TENTATIVE  |
+ * | Step skipping (financial)   | No        | MEDIUM   | TENTATIVE  |
  * | Value manipulation (price)  | Yes       | HIGH     | CERTAIN    |
  * | Value manipulation (other)  | Yes       | MEDIUM   | FIRM       |
  * | Race condition              | Yes       | HIGH     | FIRM       |
- * | Race condition              | No        | MEDIUM   | TENTATIVE  |
+ * | Race condition              | No        | LOW      | TENTATIVE  |
  * | Replay/repeat abuse         | Yes       | MEDIUM   | CERTAIN    |
  * | IDOR in workflow            | Yes       | HIGH     | CERTAIN    |
+ * | IDOR in workflow            | No        | MEDIUM   | TENTATIVE  |
  * | Missing rate limit          | Yes       | LOW      | FIRM       |
  * | State confusion             | Yes       | MEDIUM   | FIRM       |
  * | Generic suspicious          | No        | INFO     | TENTATIVE  |
@@ -33,15 +41,15 @@ public class SeverityMapper {
 
         switch (vulnerabilityType) {
             case "step_skipping":
-                return AuditIssueSeverity.HIGH;
+                return validated ? AuditIssueSeverity.HIGH : AuditIssueSeverity.MEDIUM;
             case "value_manipulation":
                 return validated ? AuditIssueSeverity.HIGH : AuditIssueSeverity.MEDIUM;
             case "race_condition":
-                return validated ? AuditIssueSeverity.HIGH : AuditIssueSeverity.MEDIUM;
+                return validated ? AuditIssueSeverity.HIGH : AuditIssueSeverity.LOW;
             case "replay_attack":
                 return AuditIssueSeverity.MEDIUM;
             case "idor_in_workflow":
-                return AuditIssueSeverity.HIGH;
+                return validated ? AuditIssueSeverity.HIGH : AuditIssueSeverity.MEDIUM;
             case "missing_rate_limit":
                 return AuditIssueSeverity.LOW;
             case "state_confusion":
@@ -75,9 +83,10 @@ public class SeverityMapper {
             }
             return AuditIssueConfidence.FIRM;
         } else {
-            // Unvalidated findings
-            return "VULNERABLE".equals(overallVerdict)
-                    ? AuditIssueConfidence.TENTATIVE : AuditIssueConfidence.TENTATIVE;
+            // Unvalidated findings are always TENTATIVE; we no longer
+            // pretend they are firm. The AdvisoryManager adds a "Needs
+            // Review" suffix to the issue name for these.
+            return AuditIssueConfidence.TENTATIVE;
         }
     }
 }

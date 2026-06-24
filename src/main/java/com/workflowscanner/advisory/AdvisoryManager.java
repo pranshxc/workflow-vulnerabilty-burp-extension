@@ -78,9 +78,18 @@ public class AdvisoryManager {
             return null;
         }
 
-        // Determine if validated
+        // Determine if validated. We use the strict accessor: only
+        // CONFIRMED proof levels count as "validated" for high-severity
+        // issue creation. PROBABLE findings are downgraded to medium
+        // severity and labeled as needing review; this prevents a flood
+        // of false-confirmed Burp issues driven by response similarity.
         boolean validated = validationResults != null
+                && validationResults.stream().anyMatch(ValidationResult::isConfirmedStrict);
+        boolean probable = !validated && validationResults != null
                 && validationResults.stream().anyMatch(ValidationResult::isConfirmed);
+        boolean errored = !validated && !probable && validationResults != null
+                && validationResults.stream().anyMatch(
+                        r -> r.getProofLevel() == ValidationResult.ProofLevel.ERROR);
 
         // Map severity and confidence
         AuditIssueSeverity severity = SeverityMapper.mapSeverity(
@@ -93,6 +102,8 @@ public class AdvisoryManager {
                 ? formatVulnType(verdict.getVulnerabilityType()) : "Workflow Vulnerability";
         String issueName = "Workflow " + vulnType;
         if (validated) issueName += " (Confirmed)";
+        else if (probable) issueName += " (Needs Review)";
+        else if (errored) issueName += " (Test Failed)";
 
         // Determine base URL from chain
         String baseUrl = "";

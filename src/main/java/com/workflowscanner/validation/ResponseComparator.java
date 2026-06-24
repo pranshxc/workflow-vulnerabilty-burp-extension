@@ -7,6 +7,24 @@ import java.util.Set;
 /**
  * Smart response comparison that understands what "success" vs "failure" looks like.
  * Compares HTTP responses across multiple dimensions.
+ *
+ * <p><b>Proof-level separation (validation rework):</b>
+ * The old {@link #isVulnerabilityConfirmed} method collapsed every heuristic
+ * into a single boolean. That treats "both responses are 200 and have the
+ * same shape" as a confirmed finding, which produces many false positives
+ * in practice (e.g. a price=0.01 mutation returns the same checkout page).
+ * The new {@link #classifyProof} method returns a tri-state
+ * {@link ValidationResult.ProofLevel}:
+ *
+ * <ul>
+ *   <li>{@code NOT_CONFIRMED} — server rejected, response is clearly different,
+ *       or the original was a 4xx/5xx (the test cannot have succeeded).</li>
+ *   <li>{@code PROBABLE} — response is suspiciously similar to a success but
+ *       no concrete business-state effect was observed. Needs human review.</li>
+ *   <li>{@code CONFIRMED} is reserved for code that observed an actual
+ *       business-state change; this comparator never returns CONFIRMED on
+ *       similarity alone.</li>
+ * </ul>
  */
 public class ResponseComparator {
 
@@ -59,25 +77,50 @@ public class ResponseComparator {
     }
 
     /**
-     * Determine if a test response indicates the vulnerability was confirmed.
-     * The test "succeeded" (from attacker's perspective) if the server accepted
-     * the manipulated/skipped/replayed request similarly to the original.
+     * Classify the comparison result into a proof level. Pure response
+     * comparison cannot prove a business-logic bug by itself; this method
+     * therefore never returns {@code CONFIRMED} directly. Callers that have
+     * a {@link StateCheck} should call
+     * {@link ValidationResult#addStateCheck} which will promote the proof
+     * level to CONFIRMED when concrete effects were observed.
+     */
+    public static ValidationResult.ProofLevel classifyProof(ComparisonResult comparison) {
+        if (comparison == null) {
+            return ValidationResult.ProofLevel.ERROR;
+        }
+        // If the original was not even a success, the test cannot have
+        // succeeded — that is a definite non-confirm.
+        if (!isSuccessStatus(comparison.origStatus)) {
+            return ValidationResult.ProofLevel.NOT_CONFIRMED;
+        }
+        // The test response is a clear rejection.
+        if (comparison.testStatus >= 400) {
+            return ValidationResult.ProofLevel.NOT_CONFIRMED;
+        }
+        if (comparison.testHasFailureKeywords && !comparison.testHasSuccessKeywords) {
+            return ValidationResult.ProofLevel.NOT_CONFIRMED;
+        }
+        // The test "looks successful" but we have no business-effect proof.
+        // This is the largest source of false positives in the old code;
+        // we surface it explicitly as PROBABLE.
+        if (comparison.bothSuccessful
+                && (comparison.bodySimilarity > 0.5
+                        || (comparison.testHasSuccessKeywords
+                                && !comparison.testHasFailureKeywords))) {
+            return ValidationResult.ProofLevel.PROBABLE;
+        }
+        // Different shape from the original.
+        return ValidationResult.ProofLevel.NOT_CONFIRMED;
+    }
+
+    /**
+     * Backward-compatible boolean. Returns true when the comparison looks
+     * like a successful attack (i.e. the new {@code classifyProof} would
+     * return PROBABLE). For full proof-level semantics, prefer
+     * {@link #classifyProof} and combine with a {@link StateCheck}.
      */
     public static boolean isVulnerabilityConfirmed(ComparisonResult comparison) {
-        // If test got a success status and original also got success -> likely confirmed
-        if (comparison.bothSuccessful && comparison.bodySimilarity > 0.5) {
-            return true;
-        }
-        // If test has success keywords and no failure keywords -> likely confirmed
-        if (comparison.testHasSuccessKeywords && !comparison.testHasFailureKeywords
-                && isSuccessStatus(comparison.testStatus)) {
-            return true;
-        }
-        // If responses are very similar (>80%) and both successful -> confirmed
-        if (comparison.bodySimilarity > 0.8 && comparison.bothSuccessful) {
-            return true;
-        }
-        return false;
+        return classifyProof(comparison) == ValidationResult.ProofLevel.PROBABLE;
     }
 
     private static boolean isSuccessStatus(int status) {

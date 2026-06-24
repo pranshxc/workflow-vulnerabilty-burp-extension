@@ -173,14 +173,13 @@ public class ValidationEngine {
                             response.statusCode, response.body);
 
             result.setResponseSimilarity(comparison.bodySimilarity);
-            boolean confirmed = ResponseComparator.isVulnerabilityConfirmed(comparison);
-            result.setConfirmed(confirmed);
-            result.setConfidence(confirmed ? 0.9 : 0.3);
-            result.setEvidence("Step-skip test (auth-preserving): replayed final step without prerequisites.\n"
-                    + comparison.evidence
-                    + (confirmed ? "\nServer accepted request without prerequisites!"
-                    : "\nServer correctly rejected the request."));
+            applyProofLevel(result, comparison,
+                    "Step-skip test (auth-preserving): replayed final step without prerequisites.\n",
+                    "\nServer accepted request without prerequisites!",
+                    "\nServer correctly rejected the request.");
         } else {
+            result.setProofLevel(ValidationResult.ProofLevel.ERROR);
+            result.setConfidence(0.1);
             result.setEvidence("Replay failed - no response received.");
         }
 
@@ -222,7 +221,7 @@ public class ValidationEngine {
             ValidationResult result = new ValidationResult(
                     "State effect: " + targetNode.getMethod() + " " + targetNode.getPath()
                             + " -> GET " + followUpUrl,
-                    ValidationResult.Strategy.STEP_SKIP);
+                    ValidationResult.Strategy.STATE_EFFECT);
 
             if (dryRunMode.get()) {
                 result.setDryRun(true);
@@ -240,6 +239,7 @@ public class ValidationEngine {
                     targetNode, null, false);
 
             if (changeResponse == null) {
+                result.setProofLevel(ValidationResult.ProofLevel.ERROR);
                 result.setEvidence("State effect test failed: no response from replay.");
                 results.add(result);
                 continue;
@@ -263,27 +263,39 @@ public class ValidationEngine {
                         ? followUpNode.getRequest().getResponseBody() : "";
                 int origStatus = followUpNode != null ? followUpNode.getStatusCode() : 200;
 
-                ResponseComparator.ComparisonResult comparison =
-                        ResponseComparator.compare(origStatus, origBody,
-                                followUpResponse.statusCode, followUpResponse.body);
+                // Build a state-diff check. Adding it to the result
+                // auto-promotes the proof level to CONFIRMED when concrete
+                // business effects are observed.
+                StateCheck check = StateEffectExtractor.diff(
+                        followUpUrl, origStatus, origBody,
+                        followUpResponse.statusCode, followUpResponse.body);
+                result.addStateCheck(check);
 
                 result.setOriginalStatusCode(origStatus);
                 result.setTestStatusCode(followUpResponse.statusCode);
-                result.setResponseSimilarity(comparison.bodySimilarity);
+                result.setResponseSimilarity(check.statusChanged() ? 0.0 :
+                        ResponseComparator.computeJaccardSimilarity(origBody, followUpResponse.body));
 
-                // If responses differ significantly, state may have changed
-                boolean stateChanged = comparison.bodySimilarity < 0.7
-                        || origStatus != followUpResponse.statusCode;
-                result.setConfirmed(stateChanged);
-                result.setConfidence(stateChanged ? 0.7 : 0.1);
+                switch (result.getProofLevel()) {
+                    case CONFIRMED:
+                        result.setConfidence(0.9);
+                        break;
+                    case PROBABLE:
+                        result.setConfidence(0.5);
+                        break;
+                    default:
+                        result.setConfidence(0.2);
+                }
                 result.setEvidence("State effect test: replayed " + targetNode.getMethod()
                         + " " + targetNode.getPath() + "\n"
                         + "Follow-up GET " + followUpUrl + ": status "
                         + origStatus + " -> " + followUpResponse.statusCode + "\n"
-                        + "Response similarity: " + String.format("%.2f", comparison.bodySimilarity)
-                        + (stateChanged ? "\nState changed after replay!"
-                        : "\nNo detectable state change."));
+                        + check.summarize()
+                        + (result.getProofLevel() == ValidationResult.ProofLevel.CONFIRMED
+                                ? "\nBusiness effect observed: " + check.summarize()
+                                : "\nNo concrete business effect observed."));
             } else {
+                result.setProofLevel(ValidationResult.ProofLevel.ERROR);
                 result.setEvidence("State effect test: replayed successfully but follow-up GET failed.");
             }
 
@@ -325,7 +337,9 @@ public class ValidationEngine {
                 }
 
                 long start = System.currentTimeMillis();
-                RequestReplayer.ReplayResponse response = replayer.replay(node, mods, false);
+                List<MutationResult> mutations = new java.util.ArrayList<>();
+                RequestReplayer.ReplayResponse response = replayer.replay(
+                        node, mods, false, mutations);
                 result.setDurationMs(System.currentTimeMillis() - start);
 
                 if (response != null) {
@@ -339,11 +353,31 @@ public class ValidationEngine {
                                     response.statusCode, response.body);
 
                     result.setResponseSimilarity(comparison.bodySimilarity);
-                    boolean confirmed = ResponseComparator.isVulnerabilityConfirmed(comparison);
-                    result.setConfirmed(confirmed);
-                    result.setConfidence(confirmed ? 0.85 : 0.2);
-                    result.setEvidence("Value manipulation: set " + param + "=0.01\n"
-                            + comparison.evidence);
+                    applyProofLevel(result, comparison,
+                            "Value manipulation: set " + param + "=0.01\n",
+                            null,
+                            null);
+
+                    // Add a state check so the result is promoted to
+                    // CONFIRMED when an attacker-controlled value (e.g. 0.01)
+                    // actually persists in the response.
+                    result.addStateCheck(StateEffectExtractor.diff(
+                            response.body != null ? node.getUrl() : null,
+                            node.getStatusCode(), origBody,
+                            response.statusCode, response.body));
+
+                    // If the mutation could not be applied at all, this
+                    // test is invalid. Mark it as ERROR with a clear reason.
+                    boolean anyApplied = mutations.stream().anyMatch(MutationResult::isApplied);
+                    if (!anyApplied) {
+                        String reason = mutations.isEmpty()
+                                ? "no mutations were specified"
+                                : "mutation did not apply: " + mutations.get(0).getReason();
+                        result.setProofLevel(ValidationResult.ProofLevel.ERROR);
+                        result.setConfidence(0.1);
+                        result.setEvidence("Value manipulation failed: " + reason
+                                + ". The test cannot be trusted.");
+                    }
                 }
 
                 results.add(result);
@@ -388,11 +422,23 @@ public class ValidationEngine {
                 rateLimitDelay();
             }
 
-            result.setConfirmed(successCount >= 2);
-            result.setConfidence(successCount >= 3 ? 0.9 : successCount >= 2 ? 0.7 : 0.2);
+            // 3/3 identical successes are PROBABLE, not CONFIRMED —
+            // the server might legitimately accept identical requests
+            // (idempotent read) or silently dedupe. Without a business
+            // effect observation, treat as needing human review.
+            if (successCount >= 3) {
+                result.setProofLevel(ValidationResult.ProofLevel.PROBABLE);
+                result.setConfidence(0.6);
+            } else if (successCount >= 2) {
+                result.setProofLevel(ValidationResult.ProofLevel.PROBABLE);
+                result.setConfidence(0.5);
+            } else {
+                result.setProofLevel(ValidationResult.ProofLevel.NOT_CONFIRMED);
+                result.setConfidence(0.2);
+            }
             result.setEvidence("Replay test: sent request 3 times, "
                     + successCount + "/3 succeeded."
-                    + (successCount >= 2 ? " Missing idempotency control!" : ""));
+                    + (successCount >= 2 ? " Possible missing idempotency control; needs review." : ""));
 
             results.add(result);
         }
@@ -456,13 +502,24 @@ public class ValidationEngine {
             int successCount = (int) responses.stream()
                     .filter(r -> r.statusCode >= 200 && r.statusCode < 400).count();
 
-            // If multiple concurrent requests all succeeded where only one should
-            result.setConfirmed(successCount > 1);
-            result.setConfidence(successCount >= 4 ? 0.9 : successCount >= 2 ? 0.7 : 0.2);
+            // Race conditions are an interesting case: a 2xx from every
+            // concurrent request is necessary but not sufficient proof.
+            // Without an observed business effect (e.g. duplicate order
+            // count, new state appearing), the result is at most PROBABLE.
+            if (successCount >= 4) {
+                result.setProofLevel(ValidationResult.ProofLevel.PROBABLE);
+                result.setConfidence(0.7);
+            } else if (successCount >= 2) {
+                result.setProofLevel(ValidationResult.ProofLevel.PROBABLE);
+                result.setConfidence(0.5);
+            } else {
+                result.setProofLevel(ValidationResult.ProofLevel.NOT_CONFIRMED);
+                result.setConfidence(0.2);
+            }
             result.setEvidence("Race condition test: sent " + concurrency
                     + " concurrent requests, " + successCount + "/" + responses.size()
                     + " succeeded."
-                    + (successCount > 1 ? " Possible race condition!" : ""));
+                    + (successCount > 1 ? " Possible race condition; needs review." : ""));
 
             results.add(result);
             rateLimitDelay();
@@ -522,18 +579,49 @@ public class ValidationEngine {
                     }
 
                     long start = System.currentTimeMillis();
-                    RequestReplayer.ReplayResponse response = replayer.replay(node, mods, false);
+                    List<MutationResult> mutations = new java.util.ArrayList<>();
+                    RequestReplayer.ReplayResponse response = replayer.replay(
+                            node, mods, false, mutations);
                     result.setDurationMs(System.currentTimeMillis() - start);
 
                     if (response != null) {
                         result.setOriginalStatusCode(node.getStatusCode());
                         result.setTestStatusCode(response.statusCode);
-                        boolean confirmed = response.statusCode >= 200 && response.statusCode < 400;
-                        result.setConfirmed(confirmed);
-                        result.setConfidence(confirmed ? 0.9 : 0.2);
+
+                        // IDOR confirmation requires more than a 2xx — the
+                        // server can return 200 with an empty body or with
+                        // the original resource even when the ID is wrong.
+                        // We require a state observation (different id
+                        // echoed, different fields) to call it CONFIRMED.
+                        String origBody = node.getRequest() != null
+                                ? node.getRequest().getResponseBody() : "";
+                        ResponseComparator.ComparisonResult comparison =
+                                ResponseComparator.compare(node.getStatusCode(), origBody,
+                                        response.statusCode, response.body);
+                        applyProofLevel(result, comparison,
+                                "IDOR test: changed " + entry.getKey() + " to " + newValue + "\n",
+                                null,
+                                null);
+                        result.addStateCheck(StateEffectExtractor.diff(
+                                node.getUrl(), node.getStatusCode(), origBody,
+                                response.statusCode, response.body));
+                        result.setResponseSimilarity(comparison.bodySimilarity);
                         result.setEvidence("IDOR test: changed " + entry.getKey()
                                 + " to " + newValue + ", got " + response.statusCode
-                                + (confirmed ? " - accessed another user's resource!" : ""));
+                                + "\nProof level: " + result.getProofLevel()
+                                + (result.getProofLevel() == ValidationResult.ProofLevel.CONFIRMED
+                                        ? " - accessed another user's resource."
+                                        : " - needs review; not enough evidence."));
+                    } else {
+                        result.setProofLevel(ValidationResult.ProofLevel.ERROR);
+                        result.setEvidence("IDOR test failed: no response from replay.");
+                    }
+
+                    // If the ID mutation did not apply, the test is invalid.
+                    if (!mutations.isEmpty() && mutations.stream().noneMatch(MutationResult::isApplied)) {
+                        result.setProofLevel(ValidationResult.ProofLevel.ERROR);
+                        result.setEvidence("IDOR mutation failed to apply: "
+                                + mutations.get(0).getReason());
                     }
 
                     results.add(result);
@@ -580,8 +668,9 @@ public class ValidationEngine {
             }
 
             long start = System.currentTimeMillis();
+            List<MutationResult> mutations = new java.util.ArrayList<>();
             RequestReplayer.ReplayResponse response = replayer.replay(
-                    matchingNode, test.getModifications(), false);
+                    matchingNode, test.getModifications(), false, mutations);
             result.setDurationMs(System.currentTimeMillis() - start);
 
             if (response != null) {
@@ -595,11 +684,24 @@ public class ValidationEngine {
                                 response.statusCode, response.body);
 
                 result.setResponseSimilarity(comparison.bodySimilarity);
-                boolean confirmed = ResponseComparator.isVulnerabilityConfirmed(comparison);
-                result.setConfirmed(confirmed);
-                result.setConfidence(confirmed ? 0.85 : 0.2);
-                result.setEvidence("LLM suggested test: " + test.getTestName() + "\n"
-                        + comparison.evidence);
+                applyProofLevel(result, comparison,
+                        "LLM suggested test: " + test.getTestName() + "\n",
+                        null,
+                        null);
+                result.addStateCheck(StateEffectExtractor.diff(
+                        matchingNode.getUrl(), matchingNode.getStatusCode(), origBody,
+                        response.statusCode, response.body));
+
+                // If the LLM-supplied modification could not apply, the
+                // test did not test what it claims to test.
+                if (!mutations.isEmpty() && mutations.stream().noneMatch(MutationResult::isApplied)) {
+                    result.setProofLevel(ValidationResult.ProofLevel.ERROR);
+                    result.setEvidence("LLM suggested test mutation failed: "
+                            + mutations.get(0).getReason());
+                }
+            } else {
+                result.setProofLevel(ValidationResult.ProofLevel.ERROR);
+                result.setEvidence("LLM suggested test failed: no response from replay.");
             }
 
             results.add(result);
@@ -641,5 +743,62 @@ public class ValidationEngine {
 
     public int getConfirmedCount() {
         return (int) allResults.stream().filter(ValidationResult::isConfirmed).count();
+    }
+
+    public int getStrictConfirmedCount() {
+        return (int) allResults.stream()
+                .filter(ValidationResult::isConfirmedStrict)
+                .count();
+    }
+
+    // ========================================================================
+    // Proof-level wiring helpers
+    // ========================================================================
+
+    /**
+     * Map a {@link ResponseComparator.ComparisonResult} onto the result's
+     * proof level. The comparator can return CONFIRMED only when a
+     * business-state observation is present; this helper centralises the
+     * evidence-string composition so the per-strategy call sites stay
+     * readable.
+     */
+    private void applyProofLevel(ValidationResult result,
+                                  ResponseComparator.ComparisonResult comparison,
+                                  String evidencePrefix,
+                                  String confirmedSuffix,
+                                  String notConfirmedSuffix) {
+        ValidationResult.ProofLevel level =
+                ResponseComparator.classifyProof(comparison);
+        result.setProofLevel(level);
+        switch (level) {
+            case CONFIRMED:
+                result.setConfidence(0.9);
+                break;
+            case PROBABLE:
+                result.setConfidence(0.6);
+                break;
+            case NOT_CONFIRMED:
+                result.setConfidence(0.2);
+                break;
+            case ERROR:
+                result.setConfidence(0.1);
+                break;
+        }
+        StringBuilder sb = new StringBuilder(evidencePrefix);
+        sb.append(comparison.evidence);
+        switch (level) {
+            case CONFIRMED:
+                if (confirmedSuffix != null) sb.append(confirmedSuffix);
+                break;
+            case PROBABLE:
+                sb.append("\nResponse looks similar to success but no business-effect proof yet; review manually.");
+                break;
+            case NOT_CONFIRMED:
+                if (notConfirmedSuffix != null) sb.append(notConfirmedSuffix);
+                break;
+            case ERROR:
+                break;
+        }
+        result.setEvidence(sb.toString());
     }
 }
