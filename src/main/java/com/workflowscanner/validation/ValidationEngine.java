@@ -192,6 +192,9 @@ public class ValidationEngine {
     // f) State Effect Validation
     //    After replaying a mutated/replayed request, send a follow-up GET to
     //    the referrer or the previous step's URL to detect state changes.
+    //    The baseline is fetched FRESH just before the replay, not taken
+    //    from the captured original response — using a stale baseline
+    //    would cause false positives when the app state has drifted.
     // ========================================================================
 
     private List<ValidationResult> validateStateEffects(List<RequestNode> chain) {
@@ -206,14 +209,12 @@ public class ValidationEngine {
             if (!"POST".equals(method) && !"PUT".equals(method) && !"DELETE".equals(method)) continue;
             if (!isInScope(targetNode)) continue;
 
-            RequestNode followUpNode = chain.get(i - 1); // Previous step as baseline
-
             // Find the follow-up URL from referrer or previous step's path
             String followUpUrl = null;
             if (targetNode.getRequest() != null && targetNode.getRequest().getReferrer() != null) {
                 followUpUrl = targetNode.getRequest().getReferrer();
-            } else if (followUpNode != null && followUpNode.getUrl() != null) {
-                followUpUrl = followUpNode.getUrl();
+            } else if (chain.get(i - 1) != null && chain.get(i - 1).getUrl() != null) {
+                followUpUrl = chain.get(i - 1).getUrl();
             }
 
             if (followUpUrl == null) continue;
@@ -234,47 +235,53 @@ public class ValidationEngine {
 
             long start = System.currentTimeMillis();
 
-            // Phase 1: Replay the state-changing request
+            // Phase 1: Fresh "before" baseline. We fetch the follow-up URL
+            // *now* rather than reusing the captured response, because the
+            // app state may have changed since capture.
+            RequestReplayer.ReplayResponse beforeResponse = replayer.fetchGet(followUpUrl);
+            if (beforeResponse == null) {
+                result.setProofLevel(ValidationResult.ProofLevel.ERROR);
+                result.setEvidence("State effect test failed: could not fetch fresh-before "
+                        + followUpUrl);
+                result.setDurationMs(System.currentTimeMillis() - start);
+                results.add(result);
+                rateLimitDelay();
+                continue;
+            }
+
+            // Phase 2: Replay the state-changing request.
             RequestReplayer.ReplayResponse changeResponse = replayer.replay(
                     targetNode, null, false);
 
             if (changeResponse == null) {
                 result.setProofLevel(ValidationResult.ProofLevel.ERROR);
                 result.setEvidence("State effect test failed: no response from replay.");
+                result.setDurationMs(System.currentTimeMillis() - start);
                 results.add(result);
+                rateLimitDelay();
                 continue;
             }
 
-            // Phase 2: Follow up with GET to detect state changes
-            // Build a simple GET request to the follow-up URL
-            RequestNode followUpTemplate = new RequestNode(targetNode.getRequest(), targetNode.getNodeIndex());
-            followUpTemplate.setUrl(followUpUrl);
-            followUpTemplate.setMethod("GET");
-            followUpTemplate.setPath("/"); // Placeholder
-
-            RequestReplayer.ReplayResponse followUpResponse = replayer.replay(
-                    followUpTemplate, null, false);
+            // Phase 3: Fresh "after" snapshot, taken from the same URL.
+            RequestReplayer.ReplayResponse afterResponse = replayer.fetchGet(followUpUrl);
 
             result.setDurationMs(System.currentTimeMillis() - start);
 
-            if (followUpResponse != null) {
-                // Compare with original follow-up node's response
-                String origBody = followUpNode != null && followUpNode.getRequest() != null
-                        ? followUpNode.getRequest().getResponseBody() : "";
-                int origStatus = followUpNode != null ? followUpNode.getStatusCode() : 200;
-
-                // Build a state-diff check. Adding it to the result
-                // auto-promotes the proof level to CONFIRMED when concrete
-                // business effects are observed.
+            if (afterResponse != null) {
+                // Diff fresh before vs fresh after. This is the meaningful
+                // comparison; the original captured response is no longer
+                // used as a baseline.
                 StateCheck check = StateEffectExtractor.diff(
-                        followUpUrl, origStatus, origBody,
-                        followUpResponse.statusCode, followUpResponse.body);
+                        followUpUrl,
+                        beforeResponse.statusCode, beforeResponse.body,
+                        afterResponse.statusCode, afterResponse.body);
                 result.addStateCheck(check);
 
-                result.setOriginalStatusCode(origStatus);
-                result.setTestStatusCode(followUpResponse.statusCode);
+                result.setOriginalStatusCode(beforeResponse.statusCode);
+                result.setTestStatusCode(afterResponse.statusCode);
                 result.setResponseSimilarity(check.statusChanged() ? 0.0 :
-                        ResponseComparator.computeJaccardSimilarity(origBody, followUpResponse.body));
+                        ResponseComparator.computeJaccardSimilarity(
+                                beforeResponse.body, afterResponse.body));
 
                 switch (result.getProofLevel()) {
                     case CONFIRMED:
@@ -286,17 +293,20 @@ public class ValidationEngine {
                     default:
                         result.setConfidence(0.2);
                 }
-                result.setEvidence("State effect test: replayed " + targetNode.getMethod()
-                        + " " + targetNode.getPath() + "\n"
-                        + "Follow-up GET " + followUpUrl + ": status "
-                        + origStatus + " -> " + followUpResponse.statusCode + "\n"
-                        + check.summarize()
+                result.setEvidence("State effect test (fresh before/after):\n"
+                        + "  Replayed " + targetNode.getMethod() + " " + targetNode.getPath()
+                        + " (status " + changeResponse.statusCode + ")\n"
+                        + "  Follow-up GET " + followUpUrl
+                        + ": " + beforeResponse.statusCode + " -> " + afterResponse.statusCode
+                        + "\n  " + check.summarize()
                         + (result.getProofLevel() == ValidationResult.ProofLevel.CONFIRMED
-                                ? "\nBusiness effect observed: " + check.summarize()
-                                : "\nNo concrete business effect observed."));
+                                ? "\nBusiness effect confirmed."
+                                : (result.getProofLevel() == ValidationResult.ProofLevel.PROBABLE
+                                        ? "\nMarker-only evidence; needs human review."
+                                        : "\nNo concrete business effect observed.")));
             } else {
                 result.setProofLevel(ValidationResult.ProofLevel.ERROR);
-                result.setEvidence("State effect test: replayed successfully but follow-up GET failed.");
+                result.setEvidence("State effect test: replayed successfully but fresh-after GET failed.");
             }
 
             results.add(result);

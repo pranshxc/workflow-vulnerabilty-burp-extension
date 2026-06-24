@@ -79,6 +79,29 @@ public class RequestReplayer {
     }
 
     /**
+     * Issue a fresh GET to a URL through Burp. Used by the state-effect
+     * validator to fetch a "fresh before" and "fresh after" baseline
+     * around the state-changing replay. Auth/session cookies are
+     * preserved (no workflow-state-token stripping) so the request
+     * behaves like a normal in-app navigation.
+     *
+     * @param url Absolute URL to GET
+     * @return The response, or null on failure
+     */
+    public ReplayResponse fetchGet(String url) {
+        if (url == null || url.isEmpty()) return null;
+        com.workflowscanner.data.CapturedRequest captured =
+                new com.workflowscanner.data.CapturedRequest();
+        captured.setUrl(url);
+        captured.setMethod("GET");
+        RequestNode node = new RequestNode(captured, 0);
+        node.setUrl(url);
+        node.setMethod("GET");
+        node.setPath("/");
+        return replay(node, null, false);
+    }
+
+    /**
      * Replay a request with mutation tracking. When {@code mutationSink} is
      * non-null, each parameter modification is recorded as a
      * {@link MutationResult} in the sink so the caller can verify which
@@ -220,25 +243,34 @@ public class RequestReplayer {
      * Apply the actual string replacement that the corresponding
      * MutationResult reported as applied. Centralised here so the
      * "did the mutation happen?" check and the "now actually do it" step
-     * use identical regexes and replacements.
+     * use identical parsing/replacement.
+     *
+     * <p><b>Reliability (validation rework follow-up):</b> the helper
+     * compares the post-replacement string to the source; if nothing
+     * changed, the replacement is treated as a no-op and the source is
+     * returned unchanged. This prevents the
+     * "tracking said applied but replacement silently failed" class of
+     * false positives.
      */
     private String replaceTracked(String source, MutationResult result,
                                    String paramName, String newValue) {
-        // We re-run the same logic that produced the MutationResult.
-        // Both must be kept in sync; this is a deliberate coupling so
-        // an "applied" claim cannot be a lie.
+        String replaced;
         if (result.getLocation() == MutationResult.Location.QUERY) {
-            String replaced = applyQueryReplacement(source, paramName, newValue,
-                    result.getOldValue());
-            return replaced != null ? replaced : source;
+            replaced = applyQueryReplacement(source, paramName, newValue);
+        } else if (result.getLocation() == MutationResult.Location.JSON_BODY) {
+            replaced = applyJsonReplacement(source, paramName, newValue);
+        } else if (result.getLocation() == MutationResult.Location.FORM_BODY) {
+            replaced = applyFormReplacement(source, paramName, newValue);
+        } else {
+            return source;
         }
-        if (result.getLocation() == MutationResult.Location.JSON_BODY) {
-            return applyJsonReplacement(source, paramName, newValue, result.getOldValue());
+        // The applied flag now means the source actually changed.
+        // If replacement produced the same string, treat it as a no-op.
+        if (replaced == null || replaced.equals(source)) {
+            result.markNotEffectivelyApplied();
+            return source;
         }
-        if (result.getLocation() == MutationResult.Location.FORM_BODY) {
-            return applyFormReplacement(source, paramName, newValue, result.getOldValue());
-        }
-        return source;
+        return replaced;
     }
 
     /**
@@ -272,6 +304,7 @@ public class RequestReplayer {
             return MutationResult.notApplied(MutationResult.Location.QUERY, paramName,
                     "URL has no query string");
         }
+        String prefix = url.substring(0, qIdx + 1);
         String query = url.substring(qIdx + 1);
         String oldValue = findQueryValue(query, paramName);
         if (oldValue == null) {
@@ -305,18 +338,18 @@ public class RequestReplayer {
     }
 
     private MutationResult applyFormMutationTracking(String body, String paramName, String newValue) {
-        Pattern p = Pattern.compile("(?<=^|&)" + Pattern.quote(paramName) + "=([^&]*)");
-        Matcher m = p.matcher(body);
-        if (m.find()) {
-            return MutationResult.applied(MutationResult.Location.FORM_BODY,
-                    paramName, m.group(1), newValue);
-        }
-        String encoded = URLEncoder.encode(paramName, StandardCharsets.UTF_8);
-        Pattern p2 = Pattern.compile("(?<=^|&)" + Pattern.quote(encoded) + "=([^&]*)");
-        Matcher m2 = p2.matcher(body);
-        if (m2.find()) {
-            return MutationResult.applied(MutationResult.Location.FORM_BODY,
-                    paramName, m2.group(1), newValue);
+        if (body == null) return null;
+        String[] pairs = body.split("&", -1);
+        String encodedName = URLEncoder.encode(paramName, StandardCharsets.UTF_8);
+        for (String pair : pairs) {
+            int eq = pair.indexOf('=');
+            String name = eq >= 0 ? pair.substring(0, eq) : pair;
+            // Match raw or URL-encoded name, percent-decoded if needed.
+            if (name.equals(paramName) || name.equals(encodedName)) {
+                String oldValue = eq >= 0 ? pair.substring(eq + 1) : "";
+                return MutationResult.applied(MutationResult.Location.FORM_BODY,
+                        paramName, oldValue, newValue);
+            }
         }
         return MutationResult.notApplied(MutationResult.Location.FORM_BODY, paramName,
                 "key not found in form body");
@@ -324,14 +357,16 @@ public class RequestReplayer {
 
     /**
      * Find the value of a parameter in a query string. Returns null when
-     * the parameter is not present.
+     * the parameter is not present. Matches both the raw and the
+     * percent-encoded form of the parameter name.
      */
     private String findQueryValue(String query, String paramName) {
         if (query == null) return null;
-        for (String pair : query.split("&")) {
+        String encodedName = URLEncoder.encode(paramName, StandardCharsets.UTF_8);
+        for (String pair : query.split("&", -1)) {
             int eq = pair.indexOf('=');
             String name = eq >= 0 ? pair.substring(0, eq) : pair;
-            if (name.equals(paramName)) {
+            if (name.equals(paramName) || name.equals(encodedName)) {
                 return eq >= 0 ? pair.substring(eq + 1) : "";
             }
         }
@@ -339,30 +374,42 @@ public class RequestReplayer {
     }
 
     /**
-     * Apply a query mutation. Both the raw and the URL-encoded form of
-     * the parameter name are matched, and the new value is URL-encoded so
-     * the resulting URL is well-formed.
+     * Apply a query mutation by splitting the query on {@code &} and
+     * rebuilding it with the new value. No regex is used for either the
+     * match or the rebuild, so the first parameter and parameters whose
+     * names contain special characters are both handled correctly. The
+     * new value is URL-encoded.
      */
-    private String applyQueryReplacement(String url, String paramName, String newValue, String oldValue) {
+    private String applyQueryReplacement(String url, String paramName, String newValue) {
         int qIdx = url.indexOf('?');
         if (qIdx < 0) return url;
         String prefix = url.substring(0, qIdx + 1);
         String query = url.substring(qIdx + 1);
         String encodedName = URLEncoder.encode(paramName, StandardCharsets.UTF_8);
-        String encodedValue = URLEncoder.encode(newValue, StandardCharsets.UTF_8);
+        String encodedValue;
+        try {
+            encodedValue = URLEncoder.encode(newValue, StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            encodedValue = newValue;
+        }
 
-        Pattern p = Pattern.compile("(?<=[?&])(" + Pattern.quote(paramName) + ")=([^&]*)");
-        Matcher m = p.matcher(query);
-        if (m.find()) {
-            query = m.replaceFirst(Matcher.quoteReplacement(m.group(1) + "=" + encodedValue));
-        } else {
-            Pattern p2 = Pattern.compile("(?<=[?&])(" + Pattern.quote(encodedName) + ")=([^&]*)");
-            Matcher m2 = p2.matcher(query);
-            if (m2.find()) {
-                query = m2.replaceFirst(Matcher.quoteReplacement(m2.group(1) + "=" + encodedValue));
+        String[] pairs = query.split("&", -1);
+        StringBuilder out = new StringBuilder(query.length() + 32);
+        boolean replaced = false;
+        for (int i = 0; i < pairs.length; i++) {
+            String pair = pairs[i];
+            int eq = pair.indexOf('=');
+            String name = eq >= 0 ? pair.substring(0, eq) : pair;
+            if (i > 0) out.append('&');
+            if (!replaced && (name.equals(paramName) || name.equals(encodedName))) {
+                out.append(encodedName).append('=').append(encodedValue);
+                replaced = true;
+            } else {
+                out.append(pair);
             }
         }
-        return prefix + query;
+        if (!replaced) return url;
+        return prefix + out.toString();
     }
 
     /**
@@ -371,7 +418,7 @@ public class RequestReplayer {
      * {@link Matcher#quoteReplacement} so that regex metacharacters in
      * the new value cannot corrupt the body.
      */
-    private String applyJsonReplacement(String body, String paramName, String newValue, String oldValue) {
+    private String applyJsonReplacement(String body, String paramName, String newValue) {
         String key = paramName.contains(".")
                 ? paramName.substring(paramName.lastIndexOf('.') + 1)
                 : paramName;
@@ -406,29 +453,35 @@ public class RequestReplayer {
     }
 
     /**
-     * Apply a form mutation. Uses Pattern.quote / Matcher.quoteReplacement
-     * to defend against metacharacters in either the parameter name or
-     * the new value, and URL-encodes the new value.
+     * Apply a form mutation by splitting the body on {@code &} and
+     * rebuilding it with the new value. No regex is used; the new value
+     * is URL-encoded. Matches both raw and percent-encoded names.
      */
-    private String applyFormReplacement(String body, String paramName, String newValue, String oldValue) {
+    private String applyFormReplacement(String body, String paramName, String newValue) {
+        String encodedName = URLEncoder.encode(paramName, StandardCharsets.UTF_8);
         String encodedValue;
         try {
-            encodedValue = java.net.URLEncoder.encode(newValue, java.nio.charset.StandardCharsets.UTF_8);
+            encodedValue = URLEncoder.encode(newValue, StandardCharsets.UTF_8);
         } catch (Exception e) {
             encodedValue = newValue;
         }
-        Pattern p = Pattern.compile("(?<=^|&)(" + Pattern.quote(paramName) + ")=[^&]*");
-        Matcher m = p.matcher(body);
-        if (m.find()) {
-            return m.replaceFirst(Matcher.quoteReplacement(m.group(1) + "=" + encodedValue));
+
+        String[] pairs = body.split("&", -1);
+        StringBuilder out = new StringBuilder(body.length() + 32);
+        boolean replaced = false;
+        for (int i = 0; i < pairs.length; i++) {
+            String pair = pairs[i];
+            int eq = pair.indexOf('=');
+            String name = eq >= 0 ? pair.substring(0, eq) : pair;
+            if (i > 0) out.append('&');
+            if (!replaced && (name.equals(paramName) || name.equals(encodedName))) {
+                out.append(encodedName).append('=').append(encodedValue);
+                replaced = true;
+            } else {
+                out.append(pair);
+            }
         }
-        String encoded = java.net.URLEncoder.encode(paramName, java.nio.charset.StandardCharsets.UTF_8);
-        Pattern p2 = Pattern.compile("(?<=^|&)(" + Pattern.quote(encoded) + ")=[^&]*");
-        Matcher m2 = p2.matcher(body);
-        if (m2.find()) {
-            return m2.replaceFirst(Matcher.quoteReplacement(m2.group(1) + "=" + encodedValue));
-        }
-        return body;
+        return replaced ? out.toString() : body;
     }
 
     /**

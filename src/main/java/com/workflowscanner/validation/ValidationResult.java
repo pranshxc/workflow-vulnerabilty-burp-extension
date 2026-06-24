@@ -153,16 +153,35 @@ public class ValidationResult {
     }
 
     /**
-     * Add a business-state observation. Adding any check that observed a
-     * concrete effect (see {@link StateCheck#isEffectObserved()}) upgrades
-     * the proof level to CONFIRMED — the response-similarity heuristic
-     * alone is not enough to call something a confirmed vulnerability.
+     * Add a business-state observation.
+     *
+     * <p>Promotion rules:
+     * <ul>
+     *   <li>If the check observed a <b>strong</b> effect (new object id,
+     *       changed business field, status change), the proof level is
+     *       upgraded to CONFIRMED.</li>
+     *   <li>If the check observed only <b>marker</b> evidence (a success
+     *       or access marker that newly appeared) without an id / field
+     *       / status change, the proof level is upgraded to at most
+     *       PROBABLE — markers alone are weak signal and need human
+     *       review.</li>
+     *   <li>Existing ERROR results are never downgraded here.</li>
+     * </ul>
      */
     public void addStateCheck(StateCheck check) {
         if (check == null) return;
         stateChecks.add(check);
-        if (check.isEffectObserved() && proofLevel != ProofLevel.ERROR) {
+        if (proofLevel == ProofLevel.ERROR) return;
+
+        if (check.hasStrongEffect()) {
             proofLevel = ProofLevel.CONFIRMED;
+        } else if (check.isEffectObserved()) {
+            // Marker-only evidence: bump to PROBABLE if we are at the
+            // default NOT_CONFIRMED level, otherwise leave the existing
+            // (potentially higher) level alone.
+            if (proofLevel == ProofLevel.NOT_CONFIRMED) {
+                proofLevel = ProofLevel.PROBABLE;
+            }
         }
     }
 
@@ -179,12 +198,23 @@ public class ValidationResult {
     public void setStrategy(Strategy strategy) { this.strategy = strategy; }
 
     /**
-     * Set the confirmed flag for backward compatibility. Maps to
-     * {@code proofLevel = CONFIRMED} when true and {@code proofLevel =
-     * NOT_CONFIRMED} when false. Prefer {@link #setProofLevel} for new code.
+     * Set the confirmed flag for backward compatibility.
+     *
+     * <p><b>Behaviour change (validation rework follow-up):</b> the old
+     * mapping of {@code true} to {@code CONFIRMED} is a footgun — code
+     * that only had response-similarity to go on (the old
+     * {@code ResponseComparator.isVulnerabilityConfirmed()} call) would
+     * silently upgrade a probable finding to strict confirmation. The
+     * comparator is now the same as {@code PROBABLE}, so mapping this
+     * setter to {@code PROBABLE} keeps legacy callers honest.
+     *
+     * <p>New code should call {@link #setProofLevel(ProofLevel)} and
+     * promote to {@code CONFIRMED} only via {@link #addStateCheck} on a
+     * check that observed a strong effect.
      */
+    @Deprecated
     public void setConfirmed(boolean confirmed) {
-        this.proofLevel = confirmed ? ProofLevel.CONFIRMED : ProofLevel.NOT_CONFIRMED;
+        this.proofLevel = confirmed ? ProofLevel.PROBABLE : ProofLevel.NOT_CONFIRMED;
     }
 
     public ProofLevel getProofLevel() { return proofLevel; }

@@ -22,12 +22,12 @@ public final class MutationResult {
         UNKNOWN
     }
 
-    private final boolean applied;
     private final Location location;
     private final String paramName;
     private final String oldValue;
     private final String newValue;
-    private final String reason;
+    private String reason;
+    private boolean applied;
 
     private MutationResult(boolean applied, Location location, String paramName,
                            String oldValue, String newValue, String reason) {
@@ -55,12 +55,26 @@ public final class MutationResult {
     public String getNewValue() { return newValue; }
     public String getReason() { return reason; }
 
+    /**
+     * Mark this result as not effectively applied. Called by the replayer
+     * when the replacement step produced a string identical to the
+     * source (e.g. parameter was found by the tracker but the rebuild
+     * produced the same value as before).
+     */
+    public void markNotEffectivelyApplied() {
+        this.applied = false;
+        if (this.reason == null) {
+            this.reason = "replacement produced no change";
+        }
+    }
+
     @Override
     public String toString() {
         if (applied) {
             return "Mutation[" + location + " " + paramName + ": '" + oldValue
                     + "' -> '" + newValue + "']";
         }
-        return "Mutation[NOT APPLIED " + location + " " + paramName + ": " + reason + "]";
+        return "Mutation[NOT APPLIED " + location + " " + paramName
+                + (reason != null ? ": " + reason : "") + "]";
     }
 }

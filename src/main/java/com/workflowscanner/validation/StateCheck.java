@@ -72,6 +72,19 @@ public final class StateCheck {
     }
 
     /**
+     * Strong effect: a new identifier, a changed business field, or a
+     * status change. This is the level of evidence we require to
+     * promote a finding to {@link ValidationResult.ProofLevel#CONFIRMED}.
+     * Marker-only evidence (a success or access string that newly
+     * appeared) does not count as strong and only upgrades to PROBABLE.
+     */
+    public boolean hasStrongEffect() {
+        return !newIds.isEmpty()
+                || !changedFields.isEmpty()
+                || statusChanged();
+    }
+
+    /**
      * One-line human-readable summary used in the validation report.
      */
     public String summarize() {
