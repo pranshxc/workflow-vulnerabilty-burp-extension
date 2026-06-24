@@ -476,13 +476,15 @@ public class GraphBuilder {
      * Adds discovered endpoints to the ApplicationModel for LLM context.
      *
      * Supports:
-     * - Quoted paths: "/api/orders/123"
+     * - Quoted paths: "/api/orders/123", "/api/orders?status=pending"
      * - Backticks/template strings: `/api/orders/${id}`
+     * - Exact "/graphql" and "/api" (no trailing segment)
      * - Full URLs: "https://api.example.com/v1/payments"
      * - Function call style: fetch("/api/..."), axios.get("/api/..."),
      *   client.post("/api/..."), XMLHttpRequest("GET", "/api/...")
-     * - Method is taken from the surrounding function call when available;
-     *   it falls back to GET or path-keyword heuristic.
+     * - Method is taken from the surrounding function call when available
+     *   (looks both before and after the URL to handle fetch(..., {method:"POST"}));
+     *   it falls back to path-keyword heuristic or GET.
      */
     private void processJavaScriptForEndpoints(CapturedRequest request) {
         if (applicationModel == null) return;
@@ -496,32 +498,29 @@ public class GraphBuilder {
         int before = applicationModel.getDiscoveredEndpoints().size();
         String requestHost = request.getHost();
 
-        // Quoted or backticked path starting with /api/ or /vN/ or /graphql or /rest/
-        java.util.regex.Pattern pathPattern = java.util.regex.Pattern.compile(
-                "[\"'`](/(?:api/|v\\d+/|graphql|rest/)[a-zA-Z0-9_/\\-{}:$]+)[\"'`]");
-        java.util.regex.Matcher pathMatcher = pathPattern.matcher(body);
-        while (pathMatcher.find()) {
-            int start = pathMatcher.start();
-            String raw = pathMatcher.group(1);
-            String method = inferMethodNear(body, start, "GET");
-            addDiscoveredEndpoint(raw, method, requestHost);
-        }
-
-        // Full absolute URLs in strings: "https://api.example.com/v1/payments"
-        java.util.regex.Pattern urlPattern = java.util.regex.Pattern.compile(
-                "[\"'`](https?://[a-zA-Z0-9.\\-]+(?:/[a-zA-Z0-9_/\\-{}:$]+))[\"'`]");
-        java.util.regex.Matcher urlMatcher = urlPattern.matcher(body);
-        while (urlMatcher.find()) {
-            int start = urlMatcher.start();
-            String fullUrl = urlMatcher.group(1);
-            String method = inferMethodNear(body, start, "GET");
-            // Split host and path
-            int schemeEnd = fullUrl.indexOf("://") + 3;
-            int pathStart = fullUrl.indexOf('/', schemeEnd);
-            if (pathStart < 0) continue;
-            String host = fullUrl.substring(0, pathStart);
-            String path = fullUrl.substring(pathStart);
-            addDiscoveredEndpoint(path, method, host);
+        // Path or full URL inside a quoted/backticked string.
+        // Broader than before: allows query strings, dots, and exact /api or
+        // /graphql without a trailing slash. Stops at the closing quote or
+        // backtick (so a stray `'` in a string literal doesn't swallow the
+        // whole file).
+        java.util.regex.Pattern endpointPattern = java.util.regex.Pattern.compile(
+                "[\"'`]("
+                + "(?:https?://[^/'\"]+)?"
+                + "/(?:"
+                + "(?:api|v\\d+|graphql|rest)"
+                + "(?:[/?#][^\"'`]+)?"
+                + ")"
+                + ")[\"'`]");
+        java.util.regex.Matcher matcher = endpointPattern.matcher(body);
+        while (matcher.find()) {
+            int matchStart = matcher.start();
+            String raw = matcher.group(1);
+            String method = inferMethodNear(body, matchStart, "GET");
+            if (raw.startsWith("http://") || raw.startsWith("https://")) {
+                parseAndAddAbsoluteUrl(raw, method);
+            } else {
+                addDiscoveredEndpoint(raw, method, requestHost);
+            }
         }
 
         int added = applicationModel.getDiscoveredEndpoints().size() - before;
@@ -532,11 +531,34 @@ public class GraphBuilder {
     }
 
     /**
+     * Parse a full absolute URL discovered in JS and add the host + path
+     * separately so it groups with real captured traffic. URI is used to
+     * strip the scheme from the host, which would otherwise mismatch
+     * EndpointKey records built from HTTP traffic (which store just the host).
+     */
+    private void parseAndAddAbsoluteUrl(String fullUrl, String method) {
+        try {
+            java.net.URI uri = java.net.URI.create(fullUrl);
+            String host = uri.getHost();
+            String path = uri.getRawPath();
+            if (host == null || path == null || path.isEmpty()) return;
+            // Drop any query string from the path; the path itself is what
+            // groups with traffic. (Queries are noise for endpoint grouping.)
+            addDiscoveredEndpoint(path, method, host);
+        } catch (IllegalArgumentException ignored) {
+            // Malformed URI; skip.
+        }
+    }
+
+    /**
      * Add a discovered endpoint to the ApplicationModel with host/hostHint handling.
      * Falls back to "js-discovery" when no host context is available.
      */
     private void addDiscoveredEndpoint(String path, String method, String hostHint) {
         if (path == null) return;
+        // Strip the query string — endpoints are grouped by path family.
+        int qIdx = path.indexOf('?');
+        if (qIdx >= 0) path = path.substring(0, qIdx);
         // Clean up template-style placeholders: ${id} -> :id, {id} -> :id
         String cleaned = path.replaceAll("\\$\\{[^}]+}", ":param")
                 .replaceAll("\\{([^}]+)\\}", ":$1");
@@ -549,16 +571,23 @@ public class GraphBuilder {
     }
 
     /**
-     * Look at the ~120 chars before a path match and try to identify an HTTP
-     * method from a surrounding call: fetch(..., {method:"POST"}),
-     * axios.post(...), client.get(...), $http.put(...), XMLHttpRequest open.
-     * Falls back to path-keyword heuristic or the supplied default.
+     * Look at the ~200 chars before AND ~300 chars after a path match to find
+     * an HTTP method from a surrounding call. The post-match window is
+     * important for fetch(url, {method: "POST"}), where the method appears
+     * after the URL.
+     * <p>
+     * Recognized patterns:
+     * - axios.post(...), client.get(...), $http.put(...), this.foo.delete(...)
+     * - { method: "POST" } or {method: 'PUT'} in either position
+     * - XMLHttpRequest open("POST", url) (method before URL)
+     * Falls back to a path-keyword heuristic, then to the supplied default.
      */
     private String inferMethodNear(String body, int matchStart, String defaultMethod) {
         int lookbackStart = Math.max(0, matchStart - 200);
-        String context = body.substring(lookbackStart, matchStart);
+        int lookaheadEnd = Math.min(body.length(), matchStart + 300);
+        String context = body.substring(lookbackStart, lookaheadEnd);
 
-        // Explicit method: { method: "POST" } or {method:'PUT'}
+        // Explicit method: { method: "POST" } or {method: 'PUT'}
         java.util.regex.Matcher m = java.util.regex.Pattern.compile(
                 "method\\s*[:=]\\s*[\"']([A-Z]+)[\"']",
                 java.util.regex.Pattern.CASE_INSENSITIVE).matcher(context);
@@ -571,6 +600,18 @@ public class GraphBuilder {
         m = java.util.regex.Pattern.compile(
                 "(?:^|[^.$a-zA-Z])(?:axios|client|api|http|\\$http|this\\.[\\w$]+)\\.([a-z]+)\\s*\\(",
                 java.util.regex.Pattern.CASE_INSENSITIVE).matcher(context);
+        if (m.find()) {
+            String verb = m.group(1).toUpperCase();
+            if (isHttpMethod(verb)) return verb;
+        }
+
+        // xhr.open("POST", ...) or xhr.open('POST', ...) — method appears
+        // before the URL, so we use only the pre-match context.
+        int lookbackEnd = Math.min(body.length(), matchStart);
+        String pre = body.substring(Math.max(0, matchStart - 200), lookbackEnd);
+        m = java.util.regex.Pattern.compile(
+                "\\.open\\s*\\(\\s*[\"']([A-Z]+)[\"']",
+                java.util.regex.Pattern.CASE_INSENSITIVE).matcher(pre);
         if (m.find()) {
             String verb = m.group(1).toUpperCase();
             if (isHttpMethod(verb)) return verb;

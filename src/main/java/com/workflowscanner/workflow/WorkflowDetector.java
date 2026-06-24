@@ -203,6 +203,11 @@ public class WorkflowDetector {
                         + " candidates (merged from " + segmented.size()
                         + " session candidates) with supporting edges.");
 
+        // 8. Publish to listeners and remember as last results.
+        // Listeners used to fire only from detectSessionOnly, leaving the
+        // preferred edge-aware path silent. Use the same threshold so both
+        // paths are observable.
+        publishCandidates(prioritized);
         lastResults = prioritized;
         return prioritized;
     }
@@ -297,17 +302,21 @@ public class WorkflowDetector {
         long gap = bFirstTs - aLastTs;
         if (gap > sessionWindowMs) return false;
 
-        // Find strong cross-candidate edges of relevant types
+        // Find strong cross-candidate edges of relevant types.
+        // Direction must flow forward: A (earlier) -> B (later). A backward
+        // edge indicates the relationship runs the wrong way for a workflow.
         for (RequestNode sourceNode : a.getSteps()) {
             for (RequestNode targetNode : b.getSteps()) {
                 List<RequestEdge> between = findEdgesBetween(graph, sourceNode, targetNode);
                 for (RequestEdge edge : between) {
+                    if (!edgeDirectionValidForWorkflow(edge, sourceNode, targetNode)) continue;
                     EdgeStrength strength = detector.getEdgeStrength(edge, sourceNode, targetNode);
                     if (strength == EdgeStrength.STRONG) {
                         EdgeType type = edge.getType();
                         if (type == EdgeType.PARAM_REUSE
                                 || type == EdgeType.REDIRECT
-                                || type == EdgeType.USER_DEFINED) {
+                                || type == EdgeType.USER_DEFINED
+                                || type == EdgeType.RESPONSE_CORRELATION) {
                             return true;
                         }
                     }
@@ -316,6 +325,25 @@ public class WorkflowDetector {
         }
 
         return false;
+    }
+
+    /**
+     * Check that an edge's source -> target direction matches the workflow's
+     * earlier -> later flow. USER_DEFINED edges are allowed undirected because
+     * the user manually grouped them. All flow-implying edge types must be
+     * forward-only: PARAM_REUSE, REDIRECT, RESPONSE_CORRELATION, REFERRER.
+     */
+    private boolean edgeDirectionValidForWorkflow(RequestEdge edge,
+                                                  RequestNode earlier,
+                                                  RequestNode later) {
+        if (edge == null || earlier == null || later == null) return false;
+        EdgeType type = edge.getType();
+        // USER_DEFINED edges are user-grouped; direction is irrelevant.
+        if (type == EdgeType.USER_DEFINED) return true;
+        // For all other flow-implying types, the source must be the earlier
+        // node and the target must be the later node.
+        return edge.getSourceNodeId().equals(earlier.getId())
+                && edge.getTargetNodeId().equals(later.getId());
     }
 
     /**
@@ -372,6 +400,11 @@ public class WorkflowDetector {
                     // Use a composite key to avoid duplicate edges
                     String edgeKey = edge.getSourceNodeId() + "->" + edge.getTargetNodeId() + ":" + edge.getType();
                     if (!addedEdgeKeys.add(edgeKey)) continue;
+
+                    // Direction must flow forward (source = earlier step,
+                    // target = later step). Reverse-direction edges do not
+                    // support the workflow flow and are skipped.
+                    if (!edgeDirectionValidForWorkflow(edge, source, target)) continue;
 
                     EdgeStrength strength = detector.getEdgeStrength(edge, source, target);
                     if (strength == EdgeStrength.STRONG || strength == EdgeStrength.MEDIUM) {
@@ -495,16 +528,27 @@ public class WorkflowDetector {
                         + (prioritized.size() - aboveThreshold - displayOnly) + " low-score");
 
         // 6. Notify listeners for each new candidate
-        for (WorkflowCandidate candidate : prioritized) {
+        publishCandidates(prioritized);
+
+        lastResults = prioritized;
+        return prioritized;
+    }
+
+    /**
+     * Publish display-worthy candidates to all registered listeners.
+     * Shared by both edge-aware and session-only detection paths so that
+     * listener behavior is consistent regardless of which detector is used.
+     */
+    private void publishCandidates(List<WorkflowCandidate> candidates) {
+        if (candidates == null || candidates.isEmpty()) return;
+        double displayThreshold = config.getWorkflowCandidateThreshold();
+        for (WorkflowCandidate candidate : candidates) {
             if (candidate.getWorkflowScore() >= displayThreshold) {
                 for (Consumer<WorkflowCandidate> listener : candidateListeners) {
                     try { listener.accept(candidate); } catch (Exception ignored) {}
                 }
             }
         }
-
-        lastResults = prioritized;
-        return prioritized;
     }
 
     /**

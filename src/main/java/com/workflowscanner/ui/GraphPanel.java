@@ -212,20 +212,23 @@ public class GraphPanel extends JPanel {
         double displayThreshold = config != null
                 ? config.getWorkflowCandidateThreshold() : 10.0;
 
-        // Get workflow candidates (if detector available) or fallback to connected components
+        // Get workflow candidates (if detector available) or fallback to connected components.
+        //
+        // We always recompute a fresh, scored preview of the current graph state
+        // here instead of reusing lastResults. lastResults is only updated by
+        // the full detect() path (edge-aware or session-only), and that path
+        // does not run on every graph change — it runs on auto-analysis
+        // debounce ticks and on explicit user triggers. If we relied on
+        // lastResults, the UI would show stale candidates whenever new traffic
+        // arrived but no detection run had completed yet.
+        //
+        // previewCandidates(score=true) is read-only: it segments and scores
+        // a snapshot of the graph but does NOT mutate lastResults or fire
+        // candidate listeners.
         List<WorkflowCandidate> candidates;
         if (workflowDetector != null) {
-            // Use last results if available (read-only, no side effects)
-            List<WorkflowCandidate> lastResults = workflowDetector.getLastResults();
-            if (!lastResults.isEmpty()) {
-                candidates = lastResults;
-            } else {
-                // Preview candidates with scoring so the display-threshold filter
-                // works even before the full detection pipeline has run.
-                // previewCandidates(score=true) does NOT mutate lastResults or fire listeners.
-                candidates = workflowDetector.previewCandidates(
-                        new ArrayList<>(graph.getNodes().values()), true);
-            }
+            candidates = workflowDetector.previewCandidates(
+                    new ArrayList<>(graph.getNodes().values()), true);
             // Filter to display-worthy candidates only
             candidates = candidates.stream()
                     .filter(c -> c.getWorkflowScore() >= displayThreshold)
@@ -411,15 +414,42 @@ public class GraphPanel extends JPanel {
     private void sendToRepeater() {
         if (selectedNode == null || selectedNode.getRequest() == null) return;
         try {
-            String url = selectedNode.getRequest().getUrl();
-            String method = selectedNode.getRequest().getMethod();
+            var src = selectedNode.getRequest();
+            String url = src.getUrl();
+            String method = src.getMethod();
+            // Build a minimal request first; headers and body are layered in
+            // afterward so the original request's auth, cookies, and content
+            // type are preserved when sending to Repeater.
             var httpReq = burp.api.montoya.http.message.requests.HttpRequest.httpRequest(url).withMethod(method);
-            if (selectedNode.getRequest().getRequestBody() != null) {
-                httpReq = httpReq.withBody(selectedNode.getRequest().getRequestBody());
+
+            // Copy request headers, skipping the Host header (Montoya sets it
+            // from the URL) and Content-Length (Burp computes it from the
+            // body). Cookie, Authorization, X-*, and custom headers are kept.
+            if (src.getRequestHeaders() != null) {
+                for (var entry : src.getRequestHeaders().entrySet()) {
+                    String name = entry.getKey();
+                    if (name == null) continue;
+                    String lname = name.toLowerCase();
+                    if (lname.equals("host") || lname.equals("content-length")
+                            || lname.equals("connection")) {
+                        continue;
+                    }
+                    for (String value : entry.getValue()) {
+                        if (value == null) continue;
+                        httpReq = httpReq.withAddedHeader(name, value);
+                    }
+                }
             }
+
+            if (src.getRequestBody() != null) {
+                httpReq = httpReq.withBody(src.getRequestBody());
+            }
+
             api.repeater().sendToRepeater(httpReq, "WF-Node#" + selectedNode.getNodeIndex());
             logger.log(LogCategory.EXTENSION, LogLevel.INFO, "GraphPanel",
-                    "Sent Node#" + selectedNode.getNodeIndex() + " to Repeater.");
+                    "Sent Node#" + selectedNode.getNodeIndex() + " to Repeater "
+                            + "(headers preserved: "
+                            + (src.getRequestHeaders() != null ? src.getRequestHeaders().size() : 0) + ").");
         } catch (Exception e) {
             logger.log(LogCategory.ERROR, LogLevel.ERROR, "GraphPanel",
                     "Failed to send to Repeater.", e);

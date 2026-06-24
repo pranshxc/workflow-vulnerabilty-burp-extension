@@ -57,6 +57,15 @@ public class StaticNoiseRules {
             "/api/session", "/api/v1/session",
             "/api/auth/me", "/api/auth/session");
 
+    // Explicit safe child paths of context reads. Anything not listed here
+    // (e.g. /api/me/delete-account) is NOT treated as a context read.
+    private static final Set<String> CONTEXT_READ_CHILD_PATHS = Set.of(
+            "/api/me/permissions",
+            "/api/me/roles",
+            "/api/me/entitlements",
+            "/api/session/current",
+            "/api/auth/session/current");
+
     // Third-party analytics/telemetry domains (partial match)
     private static final Set<String> THIRD_PARTY_DOMAINS = Set.of(
             "google-analytics.com", "googletagmanager.com", "doubleclick.net",
@@ -72,12 +81,23 @@ public class StaticNoiseRules {
     /**
      * Check if a path matches context-read patterns (e.g. /api/me, /api/user).
      * These are not workflow steps but carry auth/user context for the ApplicationModel.
+     * <p>
+     * Matches the path itself exactly (with optional query string), or an
+     * explicit safe child path from {@link #CONTEXT_READ_CHILD_PATHS}. A
+     * blanket child-prefix check is intentionally avoided: paths like
+     * /api/me/delete-account or /api/session/revoke can host real workflow
+     * actions and must NOT be classified as context reads.
      */
     public static boolean isContextReadPath(String path) {
         if (path == null) return false;
         String lower = path.toLowerCase();
         for (String cp : CONTEXT_READ_PATHS) {
-            if (lower.equals(cp) || lower.startsWith(cp + "/") || lower.startsWith(cp + "?")) {
+            if (lower.equals(cp) || lower.startsWith(cp + "?")) {
+                return true;
+            }
+        }
+        for (String child : CONTEXT_READ_CHILD_PATHS) {
+            if (lower.equals(child) || lower.startsWith(child + "?")) {
                 return true;
             }
         }

@@ -60,10 +60,24 @@ public class RequestEdge {
     /**
      * Returns true if this edge represents a business value flow — i.e.,
      * a parameter value reused from one request to another with semantic meaning.
-     * Checks both edge type (PARAM_REUSE, USER_DEFINED) and the value's semantic kind.
+     * <p>
+     * Covers three edge types:
+     * <ul>
+     *   <li>PARAM_REUSE — explicit parameter value carried across requests</li>
+     *   <li>USER_DEFINED — manually grouped via context menu</li>
+     *   <li>RESPONSE_CORRELATION — workflow-state cookies (cart_id,
+     *       checkout_session, payment_intent, etc.) whose value carries
+     *       workflow meaning rather than session identity</li>
+     * </ul>
+     * The actual session cookies (JSESSIONID, access_token, etc.) are excluded
+     * by ValueKind.classify returning SESSION_TOKEN.
      */
     public boolean isBusinessValueFlow() {
-        if (type != EdgeType.PARAM_REUSE && type != EdgeType.USER_DEFINED) return false;
+        if (type != EdgeType.PARAM_REUSE
+                && type != EdgeType.USER_DEFINED
+                && type != EdgeType.RESPONSE_CORRELATION) {
+            return false;
+        }
         if (valueKind == null) return true; // legacy — assume business value
         return valueKind.isBusinessValue();
     }
