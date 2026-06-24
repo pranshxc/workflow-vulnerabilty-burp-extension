@@ -536,6 +536,11 @@ public class GraphBuilder {
      * separately so it groups with real captured traffic. URI is used to
      * strip the scheme from the host, which would otherwise mismatch
      * EndpointKey records built from HTTP traffic (which store just the host).
+     * <p>
+     * The raw query string is preserved and reattached to the path before
+     * delegation, so {@link #addDiscoveredEndpoint} (which owns the path
+     * + query splitting logic) can extract parameter names like
+     * {@code role}, {@code tenant_id} into the {@code EndpointKey}.
      */
     private void parseAndAddAbsoluteUrl(String fullUrl, String method) {
         try {
@@ -543,6 +548,12 @@ public class GraphBuilder {
             String host = uri.getHost();
             String path = uri.getRawPath();
             if (host == null || path == null || path.isEmpty()) return;
+            // Reattach the query so it survives into addDiscoveredEndpoint.
+            // Without this, query keys for absolute URLs would be lost.
+            String rawQuery = uri.getRawQuery();
+            if (rawQuery != null && !rawQuery.isEmpty()) {
+                path = path + "?" + rawQuery;
+            }
             addDiscoveredEndpoint(path, method, host);
         } catch (IllegalArgumentException ignored) {
             // Malformed URI; skip.

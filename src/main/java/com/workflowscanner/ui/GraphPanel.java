@@ -60,6 +60,15 @@ public class GraphPanel extends JPanel {
 
     private Timer refreshTimer;
 
+    // Preview cache: avoid running the (now edge-aware, fairly expensive)
+    // preview pipeline every 3 seconds when the graph has not changed.
+    // The cache key is the (graph version, display threshold) pair; values
+    // are the score-threshold-filtered candidate list shown in the chain
+    // list. Bumping the threshold correctly invalidates the cache.
+    private long cachedPreviewGraphVersion = -1L;
+    private double cachedPreviewThreshold = Double.NaN;
+    private List<WorkflowCandidate> cachedPreviewCandidates = List.of();
+
     public GraphPanel(MontoyaApi api, RequestGraph graph, AnalysisEngine analysisEngine,
                       ExtensionLogger logger) {
         this(api, graph, analysisEngine, logger, null, null);
@@ -222,17 +231,31 @@ public class GraphPanel extends JPanel {
         // lastResults, the UI would show stale candidates whenever new traffic
         // arrived but no detection run had completed yet.
         //
-        // previewCandidates(score=true) is read-only: it segments and scores
+        // previewCandidates is read-only: it segments and scores
         // a snapshot of the graph but does NOT mutate lastResults or fire
         // candidate listeners.
+        //
+        // Because previewCandidates is now edge-aware (full merge + supporting
+        // edges + scoring), it can be expensive on large graphs. We therefore
+        // memoize the filtered result keyed on the graph's monotonic version
+        // counter: if the graph has not changed since the last refresh, the
+        // cached result is reused. The cache is invalidated automatically the
+        // moment a node or edge is added to the graph.
         List<WorkflowCandidate> candidates;
-        if (workflowDetector != null) {
+        long graphVersion = graph != null ? graph.getVersion() : -1L;
+        if (graphVersion == cachedPreviewGraphVersion
+                && Double.compare(displayThreshold, cachedPreviewThreshold) == 0) {
+            candidates = cachedPreviewCandidates;
+        } else if (workflowDetector != null) {
             candidates = workflowDetector.previewCandidates(
-                    new ArrayList<>(graph.getNodes().values()), true);
+                    new ArrayList<>(graph.getNodes().values()));
             // Filter to display-worthy candidates only
             candidates = candidates.stream()
                     .filter(c -> c.getWorkflowScore() >= displayThreshold)
                     .toList();
+            cachedPreviewCandidates = candidates;
+            cachedPreviewGraphVersion = graphVersion;
+            cachedPreviewThreshold = displayThreshold;
         } else {
             // Fallback: show connected components as "chains"
             candidates = new ArrayList<>();

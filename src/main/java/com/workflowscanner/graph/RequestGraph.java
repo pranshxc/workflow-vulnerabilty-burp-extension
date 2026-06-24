@@ -34,6 +34,12 @@ public class RequestGraph {
     private final List<RequestEdge> edges = new CopyOnWriteArrayList<>();
     private volatile int nextNodeIndex = 0;
 
+    // Monotonic version counter. Incremented on every structural mutation
+    // (addNode / addEdge / clear / merge). Used by callers (notably the
+    // GraphPanel preview cache) to short-circuit expensive recomputations
+    // when the graph has not changed since the last refresh.
+    private volatile long graphVersion = 0;
+
     // Adjacency lists for efficient traversal
     private final Map<String, List<String>> outgoing = new ConcurrentHashMap<>(); // nodeId -> [targetIds]
     private final Map<String, List<String>> incoming = new ConcurrentHashMap<>(); // nodeId -> [sourceIds]
@@ -48,6 +54,7 @@ public class RequestGraph {
         nodes.put(node.getId(), node);
         outgoing.putIfAbsent(node.getId(), new CopyOnWriteArrayList<>());
         incoming.putIfAbsent(node.getId(), new CopyOnWriteArrayList<>());
+        graphVersion++;
         return node;
     }
 
@@ -57,6 +64,7 @@ public class RequestGraph {
                 .add(edge.getTargetNodeId());
         incoming.computeIfAbsent(edge.getTargetNodeId(), k -> new CopyOnWriteArrayList<>())
                 .add(edge.getSourceNodeId());
+        graphVersion++;
     }
 
     public RequestNode getNode(String nodeId) {
@@ -234,14 +242,18 @@ public class RequestGraph {
      * Merge another graph into this one (e.g., backfill data into live graph).
      */
     public void merge(RequestGraph other) {
+        boolean changed = false;
         for (RequestNode node : other.nodes.values()) {
             if (!nodes.containsKey(node.getId())) {
                 addNode(node);
+                changed = true;
             }
         }
         for (RequestEdge edge : other.edges) {
             addEdge(edge);
+            changed = true;
         }
+        if (changed) graphVersion++;
     }
 
     // --- Statistics ---
@@ -310,6 +322,17 @@ public class RequestGraph {
         outgoing.clear();
         incoming.clear();
         nextNodeIndex = 0;
+        graphVersion++;
+    }
+
+    /**
+     * Monotonic graph version. Increments on every structural mutation
+     * (addNode / addEdge / clear / merge). Callers can use this to
+     * short-circuit expensive recomputations when the graph has not
+     * changed since the last refresh.
+     */
+    public long getVersion() {
+        return graphVersion;
     }
 
     // --- Stats Record ---
