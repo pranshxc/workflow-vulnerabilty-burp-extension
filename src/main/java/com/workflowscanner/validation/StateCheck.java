@@ -72,16 +72,24 @@ public final class StateCheck {
     }
 
     /**
-     * Strong effect: a new identifier, a changed business field, or a
-     * status change. This is the level of evidence we require to
-     * promote a finding to {@link ValidationResult.ProofLevel#CONFIRMED}.
-     * Marker-only evidence (a success or access string that newly
-     * appeared) does not count as strong and only upgrades to PROBABLE.
+     * Strong effect: a new identifier or a changed business field.
+     * This is the level of evidence we require to promote a finding to
+     * {@link ValidationResult.ProofLevel#CONFIRMED}.
+     *
+     * <p><b>Status changes are deliberately excluded</b> from strong
+     * effects. A status transition such as 200 → 500 or 200 → 403
+     * does not prove a business effect — it can indicate rejection,
+     * expired session, CSRF failure, or simply app instability. Status
+     * transitions are still recorded via {@link #statusChanged()} for
+     * logging and evidence, but they alone only upgrade a finding to
+     * PROBABLE at most.
+     *
+     * <p>Marker-only evidence (a success or access string that newly
+     * appeared) also does not count as strong and only upgrades to
+     * PROBABLE.
      */
     public boolean hasStrongEffect() {
-        return !newIds.isEmpty()
-                || !changedFields.isEmpty()
-                || statusChanged();
+        return !newIds.isEmpty() || !changedFields.isEmpty();
     }
 
     /**

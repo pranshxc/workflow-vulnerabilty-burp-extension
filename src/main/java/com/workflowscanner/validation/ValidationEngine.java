@@ -237,8 +237,11 @@ public class ValidationEngine {
 
             // Phase 1: Fresh "before" baseline. We fetch the follow-up URL
             // *now* rather than reusing the captured response, because the
-            // app state may have changed since capture.
-            RequestReplayer.ReplayResponse beforeResponse = replayer.fetchGet(followUpUrl);
+            // app state may have changed since capture. The target node
+            // provides auth/tenant/Accept headers so the GET is
+            // authenticated and tenant-scoped like a normal in-app
+            // navigation.
+            RequestReplayer.ReplayResponse beforeResponse = replayer.fetchGet(followUpUrl, targetNode);
             if (beforeResponse == null) {
                 result.setProofLevel(ValidationResult.ProofLevel.ERROR);
                 result.setEvidence("State effect test failed: could not fetch fresh-before "
@@ -263,7 +266,7 @@ public class ValidationEngine {
             }
 
             // Phase 3: Fresh "after" snapshot, taken from the same URL.
-            RequestReplayer.ReplayResponse afterResponse = replayer.fetchGet(followUpUrl);
+            RequestReplayer.ReplayResponse afterResponse = replayer.fetchGet(followUpUrl, targetNode);
 
             result.setDurationMs(System.currentTimeMillis() - start);
 

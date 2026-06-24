@@ -11,6 +11,7 @@ import com.workflowscanner.logging.ExtensionLogger;
 import com.workflowscanner.logging.LogCategory;
 import com.workflowscanner.logging.LogLevel;
 
+import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -55,6 +56,18 @@ public class RequestReplayer {
             "csrf", "xsrf", "x-csrf", "x-xsrf", "nonce", "state", "step",
             "_csrf", "authenticity_token");
 
+    /**
+     * Headers that should never be carried over to a fresh in-app
+     * navigation. Burp sets Host and Content-Length automatically;
+     * Content-Type, Transfer-Encoding and Connection don't apply to
+     * a bodyless GET; Cache-Control and Pragma are per-request.
+     */
+    private static final Set<String> SKIPPED_FETCH_HEADERS = Set.of(
+            "host", "content-length", "content-type", "transfer-encoding",
+            "connection", "cache-control", "pragma", "upgrade",
+            "expect", "trailer", "te", "if-none-match",
+            "if-modified-since");
+
     private final MontoyaApi api;
     private final ExtensionLogger logger;
 
@@ -89,11 +102,51 @@ public class RequestReplayer {
      * @return The response, or null on failure
      */
     public ReplayResponse fetchGet(String url) {
+        return fetchGet(url, null);
+    }
+
+    /**
+     * Issue a fresh GET to a URL using the given context node as the
+     * source of headers. The context's auth, session, accept, and
+     * custom app headers (X-Org-ID, X-Tenant-ID, etc.) are copied so
+     * the request looks like a normal in-app navigation under the same
+     * user/tenant. Workflow-state headers (CSRF, nonce, step token)
+     * and connection/transport headers are not copied.
+     *
+     * <p>This is the version the state-effect validator uses for its
+     * fresh before/after snapshots, because real production apps
+     * typically require Cookie + Authorization + tenant headers to
+     * return the authenticated response we want to diff.
+     *
+     * @param url         Absolute URL to GET
+     * @param contextNode Source of headers; may be null (no copying)
+     * @return The response, or null on failure
+     */
+    public ReplayResponse fetchGet(String url, RequestNode contextNode) {
         if (url == null || url.isEmpty()) return null;
         com.workflowscanner.data.CapturedRequest captured =
                 new com.workflowscanner.data.CapturedRequest();
         captured.setUrl(url);
         captured.setMethod("GET");
+
+        if (contextNode != null && contextNode.getRequest() != null
+                && contextNode.getRequest().getRequestHeaders() != null) {
+            java.util.Map<String, java.util.List<String>> copied =
+                    new java.util.HashMap<>();
+            for (Map.Entry<String, java.util.List<String>> h :
+                    contextNode.getRequest().getRequestHeaders().entrySet()) {
+                String name = h.getKey();
+                if (name == null) continue;
+                String lower = name.toLowerCase();
+                if (name.startsWith(":")) continue;       // HTTP/2 pseudo-headers
+                if (SKIPPED_FETCH_HEADERS.contains(lower)) continue;
+                if (WORKFLOW_STATE_HEADERS.contains(lower)) continue;
+                // Defensive copy so the original headers map is not aliased.
+                copied.put(name, new java.util.ArrayList<>(h.getValue()));
+            }
+            captured.setRequestHeaders(copied);
+        }
+
         RequestNode node = new RequestNode(captured, 0);
         node.setUrl(url);
         node.setMethod("GET");
@@ -340,12 +393,10 @@ public class RequestReplayer {
     private MutationResult applyFormMutationTracking(String body, String paramName, String newValue) {
         if (body == null) return null;
         String[] pairs = body.split("&", -1);
-        String encodedName = URLEncoder.encode(paramName, StandardCharsets.UTF_8);
         for (String pair : pairs) {
             int eq = pair.indexOf('=');
             String name = eq >= 0 ? pair.substring(0, eq) : pair;
-            // Match raw or URL-encoded name, percent-decoded if needed.
-            if (name.equals(paramName) || name.equals(encodedName)) {
+            if (paramNameMatches(name, paramName)) {
                 String oldValue = eq >= 0 ? pair.substring(eq + 1) : "";
                 return MutationResult.applied(MutationResult.Location.FORM_BODY,
                         paramName, oldValue, newValue);
@@ -357,20 +408,40 @@ public class RequestReplayer {
 
     /**
      * Find the value of a parameter in a query string. Returns null when
-     * the parameter is not present. Matches both the raw and the
-     * percent-encoded form of the parameter name.
+     * the parameter is not present. Matches the raw, percent-encoded,
+     * and percent-decoded forms of the parameter name.
      */
     private String findQueryValue(String query, String paramName) {
         if (query == null) return null;
-        String encodedName = URLEncoder.encode(paramName, StandardCharsets.UTF_8);
         for (String pair : query.split("&", -1)) {
             int eq = pair.indexOf('=');
             String name = eq >= 0 ? pair.substring(0, eq) : pair;
-            if (name.equals(paramName) || name.equals(encodedName)) {
+            if (paramNameMatches(name, paramName)) {
                 return eq >= 0 ? pair.substring(eq + 1) : "";
             }
         }
         return null;
+    }
+
+    /**
+     * True when the given parameter name (as it appears in a query
+     * string or form body) matches the target parameter name. Handles
+     * the three practical encodings: raw, percent-encoded, and
+     * percent-decoded. Decoding covers cases like
+     * {@code user%20id} → {@code user id} or {@code user+id} → {@code user id}.
+     */
+    private boolean paramNameMatches(String nameInRequest, String paramName) {
+        if (nameInRequest == null) return false;
+        if (nameInRequest.equals(paramName)) return true;
+        String encodedName = URLEncoder.encode(paramName, StandardCharsets.UTF_8);
+        if (nameInRequest.equals(encodedName)) return true;
+        try {
+            String decoded = URLDecoder.decode(nameInRequest, StandardCharsets.UTF_8);
+            if (decoded.equals(paramName)) return true;
+        } catch (Exception ignore) {
+            // Malformed percent-encoding — fall through to false.
+        }
+        return false;
     }
 
     /**
@@ -401,7 +472,7 @@ public class RequestReplayer {
             int eq = pair.indexOf('=');
             String name = eq >= 0 ? pair.substring(0, eq) : pair;
             if (i > 0) out.append('&');
-            if (!replaced && (name.equals(paramName) || name.equals(encodedName))) {
+            if (!replaced && paramNameMatches(name, paramName)) {
                 out.append(encodedName).append('=').append(encodedValue);
                 replaced = true;
             } else {
@@ -455,7 +526,8 @@ public class RequestReplayer {
     /**
      * Apply a form mutation by splitting the body on {@code &} and
      * rebuilding it with the new value. No regex is used; the new value
-     * is URL-encoded. Matches both raw and percent-encoded names.
+     * is URL-encoded. Matches raw, percent-encoded, and percent-decoded
+     * names via {@link #paramNameMatches}.
      */
     private String applyFormReplacement(String body, String paramName, String newValue) {
         String encodedName = URLEncoder.encode(paramName, StandardCharsets.UTF_8);
@@ -474,7 +546,7 @@ public class RequestReplayer {
             int eq = pair.indexOf('=');
             String name = eq >= 0 ? pair.substring(0, eq) : pair;
             if (i > 0) out.append('&');
-            if (!replaced && (name.equals(paramName) || name.equals(encodedName))) {
+            if (!replaced && paramNameMatches(name, paramName)) {
                 out.append(encodedName).append('=').append(encodedValue);
                 replaced = true;
             } else {
