@@ -17,6 +17,7 @@ import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
@@ -41,7 +42,14 @@ public class WorkflowDetector {
     private final ExtensionLogger logger;
     private final List<Consumer<WorkflowCandidate>> candidateListeners = new ArrayList<>();
     private List<WorkflowCandidate> lastResults = new ArrayList<>();
-    
+
+    // De-duplication: when the same candidate is observed across multiple
+    // detection runs, listeners should not be invoked again. The fingerprint
+    // covers step order (via ChainVerdict.generateFingerprint), the
+    // detected workflow type, and the score (rounded to a stable bucket
+    // so a small score drift does not produce a fresh event).
+    private final Set<String> publishedCandidateFingerprints = ConcurrentHashMap.newKeySet();
+
     // Graph references for edge-aware detection (set externally)
     private RequestGraph graph;
     private RelationshipDetector relationshipDetector;
@@ -54,52 +62,41 @@ public class WorkflowDetector {
     }
     
     /**
-     * Read-only preview of candidates — optionally scored, no listener publishing,
-     * no lastResults mutation, no side effects beyond the candidate's own score field.
-     * Safe to call from UI refresh thread.
+     * Edge-aware read-only preview of candidates.
+     * <p>
+     * Runs the same pipeline as the analysis path — workflow-relevant filter,
+     * session segmentation, strong-edge cross-candidate merge, supporting-edge
+     * attachment, and scoring — but does NOT update lastResults and does NOT
+     * fire candidate listeners. This guarantees UI parity: the candidate list
+     * shown in the graph panel is the same shape and score as the list that
+     * the analysis engine would produce, without any double-counting or
+     * duplicate listener events.
+     * <p>
+     * Safe to call from the UI refresh thread.
      *
      * @param allNodes all graph nodes
-     * @param score    if true, runs the scorer on each candidate so the UI can
-     *                 apply its display threshold (default true). The score is
-     *                 written to the candidate's workflowScore but lastResults
-     *                 and candidate listeners are NOT touched.
-     * @return candidates segmented by session (not merged), in chronological order
+     * @return edge-aware, scored, prioritized candidates
      */
-    public List<WorkflowCandidate> previewCandidates(List<RequestNode> allNodes, boolean score) {
+    public List<WorkflowCandidate> previewCandidates(List<RequestNode> allNodes) {
         if (allNodes == null || allNodes.isEmpty()) return List.of();
-
-        // Filter to workflow-relevant
-        List<RequestNode> relevantNodes = allNodes.stream()
-                .filter(n -> {
-                    RequestClassification cls = n.getClassification();
-                    return cls != null && cls.isWorkflowRelevant();
-                })
-                .toList();
-
-        // Segment by session (stateless)
-        List<WorkflowCandidate> candidates = WorkflowSessionizer.segmentFullGraph(
-                relevantNodes, config, logger);
-
-        // Chronological order
-        candidates.sort(Comparator.comparingLong(WorkflowCandidate::getStartTime));
-
-        if (score) {
-            for (WorkflowCandidate c : candidates) {
-                c.setWorkflowScore(scorer.score(c));
-            }
-            scorer.prioritize(candidates);
+        if (graph == null || relationshipDetector == null) {
+            // Fall back to session-only if graph context has not been wired
+            return detectSessionOnlyInternal(allNodes, false, false);
         }
-
-        return candidates;
+        return detectInternal(allNodes, graph, relationshipDetector, true, false, false);
     }
 
     /**
-     * Backwards-compatible preview: returns segmented candidates without scoring.
-     * Prefer {@link #previewCandidates(List, boolean)} with score=true for UI
-     * display that filters by score threshold.
+     * Backwards-compatible preview overload. With the new edge-aware preview
+     * above, the `score` flag is always honoured as part of the pipeline; the
+     * parameter is kept only for source-compat.
+     *
+     * @deprecated prefer {@link #previewCandidates(List)}; the new method is
+     *             always edge-aware and always scored.
      */
-    public List<WorkflowCandidate> previewCandidates(List<RequestNode> allNodes) {
-        return previewCandidates(allNodes, false);
+    @Deprecated
+    public List<WorkflowCandidate> previewCandidates(List<RequestNode> allNodes, boolean score) {
+        return previewCandidates(allNodes);
     }
 
     /**
@@ -113,7 +110,7 @@ public class WorkflowDetector {
 
     /**
      * Detect workflow candidates with supporting graph edge attachment.
-     * Preferred over {@link #detect(List)} as it uses graph structure
+     * Preferred over {@link #detectSessionOnly(List)} as it uses graph structure
      * (PARAM_REUSE, REDIRECT, REFERRER, RESPONSE_CORRELATION edges) to
      * strengthen candidate evidence and scoring.
      * Falls back to the session-only mode if graph context is not set.
@@ -123,33 +120,50 @@ public class WorkflowDetector {
      */
     public List<WorkflowCandidate> detect(List<RequestNode> allNodes) {
         if (graph != null && relationshipDetector != null) {
-            return detect(allNodes, graph, relationshipDetector);
+            return detectInternal(allNodes, graph, relationshipDetector,
+                    true, true, true);
         }
         // Fallback: session-only detection without edge attachment
-        return detectSessionOnly(allNodes);
+        return detectSessionOnlyInternal(allNodes, true, true);
     }
 
     /**
-     * Detect workflow candidates with supporting graph edge attachment.
-     * Internal method that takes explicit graph references.
-     *
-     * Pipeline:
-     * 1. Filter to workflow-relevant nodes
-     * 2. Segment by session (stateless, no scoring)
-     * 3. Sort chronologically by candidate start time
-     * 4. Merge candidates with strong cross-candidate edges
-     * 5. Attach internal supporting edges
-     * 6. Score once
-     * 7. Prioritize
-     *
-     * Note: Scoring happens exactly once, after merging. This avoids
-     * duplicated score evidence and ensures merged candidates get
-     * a single, accurate score.
+     * Detect workflow candidates with explicit graph references. Equivalent
+     * to {@link #detect(List)} but does not depend on the graph context
+     * having been wired via {@link #setGraphContext(RequestGraph, RelationshipDetector)}.
      */
     public List<WorkflowCandidate> detect(List<RequestNode> allNodes,
                                            RequestGraph graph,
                                            RelationshipDetector detector) {
         if (allNodes == null || allNodes.isEmpty()) return List.of();
+        return detectInternal(allNodes, graph, detector, true, true, true);
+    }
+
+    /**
+     * Shared detection pipeline used by both the analysis path and the UI
+     * preview. The flag trio lets callers control which side effects fire:
+     *
+     * <ul>
+     *   <li><b>edgeAware</b> — run strong-edge candidate merge and supporting
+     *       edge attachment. When false the pipeline is session-only.</li>
+     *   <li><b>publish</b> — invoke registered candidate listeners for
+     *       display-worthy candidates (after de-duplication).</li>
+     *   <li><b>updateLastResults</b> — overwrite the detector's lastResults
+     *       field with the produced list. The UI preview passes false so
+     *       analysis status indicators stay in sync with the last full run.</li>
+     * </ul>
+     */
+    private List<WorkflowCandidate> detectInternal(List<RequestNode> allNodes,
+                                                    RequestGraph graph,
+                                                    RelationshipDetector detector,
+                                                    boolean edgeAware,
+                                                    boolean publish,
+                                                    boolean updateLastResults) {
+        if (allNodes == null || allNodes.isEmpty()) return List.of();
+
+        if (!edgeAware) {
+            return detectSessionOnlyInternal(allNodes, publish, updateLastResults);
+        }
 
         // 1. Filter to workflow-relevant nodes
         List<RequestNode> relevantNodes = new ArrayList<>();
@@ -203,12 +217,8 @@ public class WorkflowDetector {
                         + " candidates (merged from " + segmented.size()
                         + " session candidates) with supporting edges.");
 
-        // 8. Publish to listeners and remember as last results.
-        // Listeners used to fire only from detectSessionOnly, leaving the
-        // preferred edge-aware path silent. Use the same threshold so both
-        // paths are observable.
-        publishCandidates(prioritized);
-        lastResults = prioritized;
+        if (publish) publishCandidates(prioritized);
+        if (updateLastResults) lastResults = prioritized;
         return prioritized;
     }
 
@@ -303,23 +313,34 @@ public class WorkflowDetector {
         if (gap > sessionWindowMs) return false;
 
         // Find strong cross-candidate edges of relevant types.
-        // Direction must flow forward: A (earlier) -> B (later). A backward
-        // edge indicates the relationship runs the wrong way for a workflow.
+        // Direction must flow forward: A (earlier) -> B (later). The
+        // directional helper makes that explicit; USER_DEFINED edges
+        // are an exception and still get a chance via
+        // edgeDirectionValidForWorkflow.
         for (RequestNode sourceNode : a.getSteps()) {
             for (RequestNode targetNode : b.getSteps()) {
-                List<RequestEdge> between = findEdgesBetween(graph, sourceNode, targetNode);
-                for (RequestEdge edge : between) {
+                // Step 1: forward flow-implying edges (PARAM_REUSE, REDIRECT,
+                // RESPONSE_CORRELATION) come from the directional helper.
+                for (RequestEdge edge : findForwardEdges(graph, sourceNode, targetNode)) {
                     if (!edgeDirectionValidForWorkflow(edge, sourceNode, targetNode)) continue;
                     EdgeStrength strength = detector.getEdgeStrength(edge, sourceNode, targetNode);
                     if (strength == EdgeStrength.STRONG) {
                         EdgeType type = edge.getType();
                         if (type == EdgeType.PARAM_REUSE
                                 || type == EdgeType.REDIRECT
-                                || type == EdgeType.USER_DEFINED
                                 || type == EdgeType.RESPONSE_CORRELATION) {
                             return true;
                         }
                     }
+                }
+                // Step 2: USER_DEFINED edges are undirected; check the
+                // full bidirectional set and let edgeDirectionValidForWorkflow
+                // accept either direction.
+                for (RequestEdge edge : findEdgesBetween(graph, sourceNode, targetNode)) {
+                    if (edge.getType() != EdgeType.USER_DEFINED) continue;
+                    if (!edgeDirectionValidForWorkflow(edge, sourceNode, targetNode)) continue;
+                    EdgeStrength strength = detector.getEdgeStrength(edge, sourceNode, targetNode);
+                    if (strength == EdgeStrength.STRONG) return true;
                 }
             }
         }
@@ -394,22 +415,32 @@ public class WorkflowDetector {
             for (int j = i + 1; j < steps.size(); j++) {
                 RequestNode source = steps.get(i);
                 RequestNode target = steps.get(j);
-                List<RequestEdge> betweenEdges = findEdgesBetween(graph, source, target);
 
-                for (RequestEdge edge : betweenEdges) {
-                    // Use a composite key to avoid duplicate edges
+                // Step 1: forward flow-implying edges via the directional
+                // helper. Direction intent is explicit at the call site.
+                for (RequestEdge edge : findForwardEdges(graph, source, target)) {
+                    if (edge.getType() == EdgeType.USER_DEFINED) continue;
                     String edgeKey = edge.getSourceNodeId() + "->" + edge.getTargetNodeId() + ":" + edge.getType();
                     if (!addedEdgeKeys.add(edgeKey)) continue;
-
-                    // Direction must flow forward (source = earlier step,
-                    // target = later step). Reverse-direction edges do not
-                    // support the workflow flow and are skipped.
-                    if (!edgeDirectionValidForWorkflow(edge, source, target)) continue;
-
                     EdgeStrength strength = detector.getEdgeStrength(edge, source, target);
                     if (strength == EdgeStrength.STRONG || strength == EdgeStrength.MEDIUM) {
                         candidate.addEdge(edge);
-                        // Populate evidence
+                        if (candidate.getEvidence() != null) {
+                            candidate.getEvidence().addContinuationSignal(
+                                    "edge:" + edge.getType() + ":" + strength
+                                            + " " + truncate(edge.getEvidence(), 80));
+                        }
+                    }
+                }
+                // Step 2: USER_DEFINED edges are undirected; pick up either
+                // direction so user-grouped steps still receive evidence.
+                for (RequestEdge edge : findEdgesBetween(graph, source, target)) {
+                    if (edge.getType() != EdgeType.USER_DEFINED) continue;
+                    String edgeKey = edge.getSourceNodeId() + "->" + edge.getTargetNodeId() + ":" + edge.getType();
+                    if (!addedEdgeKeys.add(edgeKey)) continue;
+                    EdgeStrength strength = detector.getEdgeStrength(edge, source, target);
+                    if (strength == EdgeStrength.STRONG || strength == EdgeStrength.MEDIUM) {
+                        candidate.addEdge(edge);
                         if (candidate.getEvidence() != null) {
                             candidate.getEvidence().addContinuationSignal(
                                     "edge:" + edge.getType() + ":" + strength
@@ -429,6 +460,9 @@ public class WorkflowDetector {
 
     /**
      * Find all edges between two nodes in the graph (either direction).
+     * Kept for callers that genuinely want bidirectional lookup; the merge
+     * and supporting-edge code prefer {@link #findForwardEdges} to make
+     * the direction intent explicit.
      */
     private List<RequestEdge> findEdgesBetween(RequestGraph graph,
                                                 RequestNode nodeA,
@@ -450,6 +484,26 @@ public class WorkflowDetector {
         return result;
     }
 
+    /**
+     * Find edges from {@code source} to {@code target} (forward only).
+     * This is the directional helper used by the workflow merge and
+     * supporting-edge logic. Using it instead of
+     * {@link #findEdgesBetween} makes the direction intent explicit in
+     * the call site and removes the need for a post-filter pass.
+     */
+    private List<RequestEdge> findForwardEdges(RequestGraph graph,
+                                                RequestNode source,
+                                                RequestNode target) {
+        if (source == null || target == null) return List.of();
+        List<RequestEdge> result = new ArrayList<>();
+        for (RequestEdge edge : graph.getEdgesForNode(source.getId())) {
+            if (edge.getTargetNodeId().equals(target.getId())) {
+                result.add(edge);
+            }
+        }
+        return result;
+    }
+
     private String truncate(String s, int maxLen) {
         if (s == null) return "";
         return s.length() <= maxLen ? s : s.substring(0, maxLen) + "...";
@@ -460,10 +514,21 @@ public class WorkflowDetector {
      * score, prioritize. No edge attachment.
      * Uses stateless full-graph segmentation — safe for UI/analysis threads.
      *
-     * This method publishes candidate events via listeners.
-     * For read-only preview (no side effects), use {@link #previewCandidates(List)}.
+     * This method publishes candidate events via listeners and updates
+     * lastResults. For a read-only preview with no side effects, use
+     * {@link #previewCandidates(List)}.
      */
     public List<WorkflowCandidate> detectSessionOnly(List<RequestNode> allNodes) {
+        if (allNodes == null || allNodes.isEmpty()) return List.of();
+        return detectSessionOnlyInternal(allNodes, true, true);
+    }
+
+    /**
+     * Internal session-only pipeline. Flag-controlled like {@link #detectInternal}.
+     */
+    private List<WorkflowCandidate> detectSessionOnlyInternal(List<RequestNode> allNodes,
+                                                                boolean publish,
+                                                                boolean updateLastResults) {
         if (allNodes == null || allNodes.isEmpty()) return List.of();
 
         double analysisThreshold = config.getWorkflowScoreThreshold();
@@ -527,10 +592,8 @@ public class WorkflowDetector {
                         + displayOnly + " display-only, "
                         + (prioritized.size() - aboveThreshold - displayOnly) + " low-score");
 
-        // 6. Notify listeners for each new candidate
-        publishCandidates(prioritized);
-
-        lastResults = prioritized;
+        if (publish) publishCandidates(prioritized);
+        if (updateLastResults) lastResults = prioritized;
         return prioritized;
     }
 
@@ -538,17 +601,45 @@ public class WorkflowDetector {
      * Publish display-worthy candidates to all registered listeners.
      * Shared by both edge-aware and session-only detection paths so that
      * listener behavior is consistent regardless of which detector is used.
+     * <p>
+     * Candidates are de-duplicated by a stable fingerprint covering step
+     * order, workflow type, and score bucket. Without this, repeated full
+     * detection runs (e.g. on every graph update with auto-analysis enabled)
+     * would re-fire the same listener events for candidates that have not
+     * actually changed. The fingerprint set is reset on {@link #clear()}.
      */
     private void publishCandidates(List<WorkflowCandidate> candidates) {
         if (candidates == null || candidates.isEmpty()) return;
         double displayThreshold = config.getWorkflowCandidateThreshold();
         for (WorkflowCandidate candidate : candidates) {
-            if (candidate.getWorkflowScore() >= displayThreshold) {
-                for (Consumer<WorkflowCandidate> listener : candidateListeners) {
-                    try { listener.accept(candidate); } catch (Exception ignored) {}
-                }
+            if (candidate.getWorkflowScore() < displayThreshold) continue;
+            String fp = candidateFingerprint(candidate);
+            if (!publishedCandidateFingerprints.add(fp)) continue;
+            for (Consumer<WorkflowCandidate> listener : candidateListeners) {
+                try { listener.accept(candidate); } catch (Exception ignored) {}
             }
         }
+    }
+
+    /**
+     * Build a stable fingerprint for a candidate based on its step order,
+     * detected workflow type, and a rounded score bucket. Step order is the
+     * primary signal: the same steps in the same order with the same type
+     * produce the same fingerprint even if internal IDs change.
+     */
+    private String candidateFingerprint(WorkflowCandidate candidate) {
+        StringBuilder sb = new StringBuilder();
+        for (RequestNode step : candidate.getSteps()) {
+            sb.append(step.getMethod() != null ? step.getMethod() : "?")
+                    .append(':')
+                    .append(step.getPath() != null ? step.getPath() : "?")
+                    .append('@')
+                    .append(step.getTimestamp())
+                    .append('|');
+        }
+        sb.append("type=").append(candidate.getWorkflowType());
+        sb.append("|score=").append(Math.round(candidate.getWorkflowScore()));
+        return sb.toString();
     }
 
     /**
@@ -580,6 +671,7 @@ public class WorkflowDetector {
     public void clear() {
         sessionizer.clear();
         lastResults.clear();
+        publishedCandidateFingerprints.clear();
     }
 
     public WorkflowSessionizer getSessionizer() { return sessionizer; }

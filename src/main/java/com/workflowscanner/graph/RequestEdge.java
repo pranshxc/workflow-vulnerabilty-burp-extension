@@ -69,8 +69,18 @@ public class RequestEdge {
      *       checkout_session, payment_intent, etc.) whose value carries
      *       workflow meaning rather than session identity</li>
      * </ul>
-     * The actual session cookies (JSESSIONID, access_token, etc.) are excluded
-     * by ValueKind.classify returning SESSION_TOKEN.
+     * Session cookies (JSESSIONID, access_token, etc.) are excluded by
+     * {@link ValueKind#classify} returning {@code SESSION_TOKEN}.
+     * <p>
+     * When the value kind is missing (legacy or loaded data):
+     * <ul>
+     *   <li>PARAM_REUSE / USER_DEFINED are treated as business flow (their
+     *       presence alone is a strong signal).</li>
+     *   <li>RESPONSE_CORRELATION is <b>not</b> treated as business flow
+     *       because cookie correlation is dangerous to over-trust — many
+     *       cookies are auth/session artifacts that we cannot tell apart
+     *       from workflow-state cookies without a classified value kind.</li>
+     * </ul>
      */
     public boolean isBusinessValueFlow() {
         if (type != EdgeType.PARAM_REUSE
@@ -78,7 +88,11 @@ public class RequestEdge {
                 && type != EdgeType.RESPONSE_CORRELATION) {
             return false;
         }
-        if (valueKind == null) return true; // legacy — assume business value
+        if (valueKind == null) {
+            // Conservative default for RESPONSE_CORRELATION: cookie-only
+            // edges need an explicit ValueKind to be trusted.
+            return type == EdgeType.PARAM_REUSE || type == EdgeType.USER_DEFINED;
+        }
         return valueKind.isBusinessValue();
     }
 

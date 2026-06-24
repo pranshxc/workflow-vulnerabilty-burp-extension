@@ -568,11 +568,20 @@ public class GraphPanel extends JPanel {
                 int y1 = V_PAD + i * (NODE_H + V_GAP) + NODE_H;
                 int y2 = V_PAD + (i + 1) * (NODE_H + V_GAP);
 
-                // Find edge between these nodes
-                RequestEdge edge = findEdge(from.getId(), to.getId());
+                // Find edge between these nodes, preferring forward direction
+                // (source=earlier, target=later). Reverse edges are still
+                // drawn but rendered with a distinct style so the tester can
+                // see the relationship points the wrong way.
+                EdgeWithDirection ewd = findEdgeWithDirection(from.getId(), to.getId());
+                RequestEdge edge = ewd.edge();
+                boolean reverse = ewd.reverse();
                 Color edgeColor = edge != null ? getEdgeColor(edge.getType()) : Color.LIGHT_GRAY;
                 g2.setColor(edgeColor);
-                g2.setStroke(new BasicStroke(2));
+                // Dashed for reverse edges; solid for forward or undirected.
+                g2.setStroke(reverse
+                        ? new BasicStroke(2, BasicStroke.CAP_BUTT, BasicStroke.JOIN_BEVEL,
+                                0, new float[]{4f, 3f}, 0)
+                        : new BasicStroke(2));
                 g2.drawLine(x1, y1, x1, y2);
 
                 // Arrow head
@@ -580,10 +589,13 @@ public class GraphPanel extends JPanel {
                 int[] yPoints = {y2 - 8, y2 - 8, y2};
                 g2.fillPolygon(xPoints, yPoints, 3);
 
-                // Edge label
+                // Edge label — include a reverse marker so the direction is
+                // visible at a glance.
                 if (edge != null) {
                     g2.setFont(g2.getFont().deriveFont(Font.PLAIN, 10f));
-                    String label = edge.getType().name() + " (" + String.format("%.1f", edge.getConfidence()) + ")";
+                    String prefix = reverse ? "<- " : "";
+                    String label = prefix + edge.getType().name()
+                            + " (" + String.format("%.1f", edge.getConfidence()) + ")";
                     g2.drawString(label, x1 + 10, (y1 + y2) / 2 + 4);
                 }
             }
@@ -650,16 +662,30 @@ public class GraphPanel extends JPanel {
             }
         }
 
-        private RequestEdge findEdge(String fromId, String toId) {
-            if (edges == null) return null;
+        /**
+         * Find an edge between two nodes, preferring the forward direction
+         * (source = earlier, target = later). If the only edge present is
+         * reversed, it is still returned but flagged so the caller can render
+         * it differently.
+         */
+        private EdgeWithDirection findEdgeWithDirection(String fromId, String toId) {
+            if (edges == null) return new EdgeWithDirection(null, false);
+            RequestEdge reverse = null;
             for (RequestEdge edge : edges) {
-                if ((edge.getSourceNodeId().equals(fromId) && edge.getTargetNodeId().equals(toId))
-                        || (edge.getSourceNodeId().equals(toId) && edge.getTargetNodeId().equals(fromId))) {
-                    return edge;
+                if (edge.getSourceNodeId().equals(fromId)
+                        && edge.getTargetNodeId().equals(toId)) {
+                    return new EdgeWithDirection(edge, false);
+                }
+                if (edge.getSourceNodeId().equals(toId)
+                        && edge.getTargetNodeId().equals(fromId)) {
+                    reverse = edge;
                 }
             }
-            return null;
+            return new EdgeWithDirection(reverse, reverse != null);
         }
+
+        /** Tuple of an edge and whether it was matched in reverse direction. */
+        private record EdgeWithDirection(RequestEdge edge, boolean reverse) {}
 
         private String truncate(String s, int max) {
             return s.length() <= max ? s : s.substring(0, max) + "...";

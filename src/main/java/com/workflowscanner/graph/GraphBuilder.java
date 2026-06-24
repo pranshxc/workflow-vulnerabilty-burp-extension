@@ -499,16 +499,17 @@ public class GraphBuilder {
         String requestHost = request.getHost();
 
         // Path or full URL inside a quoted/backticked string.
-        // Broader than before: allows query strings, dots, and exact /api or
-        // /graphql without a trailing slash. Stops at the closing quote or
-        // backtick (so a stray `'` in a string literal doesn't swallow the
-        // whole file).
+        // Tighter character class than a blanket "anything until the next
+        // quote" — the path body is limited to characters that can actually
+        // appear in a real URL path or query string. Stops at the closing
+        // quote/backtick so a stray `'` in a string literal doesn't swallow
+        // the whole file.
         java.util.regex.Pattern endpointPattern = java.util.regex.Pattern.compile(
                 "[\"'`]("
-                + "(?:https?://[^/'\"]+)?"
+                + "(?:https?://[A-Za-z0-9._~:/?#@!$&()*+,;=%-]+)?"
                 + "/(?:"
                 + "(?:api|v\\d+|graphql|rest)"
-                + "(?:[/?#][^\"'`]+)?"
+                + "(?:[/?#][A-Za-z0-9._~:/?#@!$&()*+,;=%{}-]*)?"
                 + ")"
                 + ")[\"'`]");
         java.util.regex.Matcher matcher = endpointPattern.matcher(body);
@@ -542,8 +543,6 @@ public class GraphBuilder {
             String host = uri.getHost();
             String path = uri.getRawPath();
             if (host == null || path == null || path.isEmpty()) return;
-            // Drop any query string from the path; the path itself is what
-            // groups with traffic. (Queries are noise for endpoint grouping.)
             addDiscoveredEndpoint(path, method, host);
         } catch (IllegalArgumentException ignored) {
             // Malformed URI; skip.
@@ -553,21 +552,59 @@ public class GraphBuilder {
     /**
      * Add a discovered endpoint to the ApplicationModel with host/hostHint handling.
      * Falls back to "js-discovery" when no host context is available.
+     * <p>
+     * The endpoint is split into path + query-parameter names. The path
+     * becomes the EndpointKey's path (cleaned of template placeholders);
+     * query-parameter names are passed as the EndpointKey's paramNames
+     * set so the LLM and the application model can reason about realistic
+     * business-logic surface area.
      */
     private void addDiscoveredEndpoint(String path, String method, String hostHint) {
         if (path == null) return;
-        // Strip the query string — endpoints are grouped by path family.
+        // Split path and query. The path groups endpoints; the query keys
+        // capture realistic business parameters (e.g. status, role, tenant_id).
+        String query = "";
         int qIdx = path.indexOf('?');
-        if (qIdx >= 0) path = path.substring(0, qIdx);
+        if (qIdx >= 0) {
+            query = path.substring(qIdx + 1);
+            path = path.substring(0, qIdx);
+        }
+        // Drop fragments — they are not part of the endpoint surface.
+        int hashIdx = path.indexOf('#');
+        if (hashIdx >= 0) path = path.substring(0, hashIdx);
+
         // Clean up template-style placeholders: ${id} -> :id, {id} -> :id
-        String cleaned = path.replaceAll("\\$\\{[^}]+}", ":param")
+        String cleanedPath = path.replaceAll("\\$\\{[^}]+}", ":param")
                 .replaceAll("\\{([^}]+)\\}", ":$1");
-        if (cleaned.isEmpty()) return;
+        if (cleanedPath.isEmpty()) return;
+
+        java.util.Set<String> queryKeys = parseQueryKeys(query);
 
         String host = (hostHint != null && !hostHint.isEmpty()) ? hostHint : "js-discovery";
         applicationModel.addEndpoint(
                 new com.workflowscanner.classification.EndpointKey(
-                        method, host, cleaned, java.util.Set.of()));
+                        method, host, cleanedPath, queryKeys));
+    }
+
+    /**
+     * Parse a raw query string into a set of parameter names. Values are
+     * discarded — only names matter for endpoint grouping and LLM context.
+     * Handles simple {@code a=1&b=2} and bracket array forms
+     * {@code a[]=1&a[]=2} (collapses to "a" in the set).
+     */
+    private static java.util.Set<String> parseQueryKeys(String query) {
+        if (query == null || query.isEmpty()) return java.util.Set.of();
+        java.util.Set<String> keys = new java.util.HashSet<>();
+        for (String pair : query.split("&")) {
+            if (pair.isEmpty()) continue;
+            int eq = pair.indexOf('=');
+            String rawKey = eq >= 0 ? pair.substring(0, eq) : pair;
+            // Drop array suffixes to collapse a[] / a[0] to a.
+            int bracket = rawKey.indexOf('[');
+            if (bracket >= 0) rawKey = rawKey.substring(0, bracket);
+            if (!rawKey.isEmpty()) keys.add(rawKey);
+        }
+        return keys;
     }
 
     /**
