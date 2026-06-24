@@ -4,10 +4,13 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.reflect.TypeToken;
 
+import com.workflowscanner.analysis.ApplicationModel;
 import com.workflowscanner.classification.EndpointNormalizer;
 import com.workflowscanner.classification.RequestClassification;
 import com.workflowscanner.classification.RequestClassifier;
+import com.workflowscanner.classification.RequestIntent;
 import com.workflowscanner.classification.EndpointKey;
+import com.workflowscanner.classification.StaticNoiseRules;
 import com.workflowscanner.config.ExtensionConfig;
 import com.workflowscanner.data.CapturedRequest;
 import com.workflowscanner.data.RequestPipeline;
@@ -66,6 +69,9 @@ public class GraphBuilder {
     // Event listeners
     private final List<Runnable> graphUpdateListeners = new ArrayList<>();
     private volatile WorkflowDetector workflowDetector;
+    
+    // Optional ApplicationModel — set by AnalysisEngine for context-read retention
+    private volatile ApplicationModel applicationModel;
 
     private volatile RequestPipeline pipeline;
     private volatile ExtensionConfig config;
@@ -98,6 +104,14 @@ public class GraphBuilder {
         if (detector != null && config != null) {
             graph.setWorkflowDetector(detector, config);
         }
+    }
+
+    /**
+     * Set the ApplicationModel for retaining context reads and JS-discovered endpoints.
+     * Called by AnalysisEngine during startup.
+     */
+    public void setApplicationModel(ApplicationModel model) {
+        this.applicationModel = model;
     }
 
     private void notifyGraphUpdated() {
@@ -193,7 +207,29 @@ public class GraphBuilder {
             // 1. Classify the request
             RequestClassification classification = classifier.classify(request);
             if (!classification.isWorkflowRelevant()) {
-                // Noise — skip graph insertion entirely
+                // Route context-read requests to ApplicationModel before suppression
+                if (classification.isBackground()
+                        && classification.getIntent() == RequestIntent.CONTEXT_READ) {
+                    // Create a minimal node for context-read processing
+                    RequestNode contextNode = new RequestNode(request, -1);
+                    contextNode.setClassification(classification);
+                    EndpointKey contextKey = normalizer.normalize(request);
+                    contextNode.setEndpointKey(contextKey);
+                    Map<String, Object> responseData = ParameterExtractor.extractResponseData(request);
+                    contextNode.setResponseData(responseData);
+                    if (applicationModel != null) {
+                        applicationModel.ingestContextRead(contextNode, logger);
+                    }
+                }
+
+                // Route JavaScript files for endpoint discovery
+                if (classification.isBackground()
+                        && classification.getIntent() == RequestIntent.STATIC_ASSET
+                        && StaticNoiseRules.isJavaScriptFile(request.getPath())) {
+                    // Extract API endpoints from JS content
+                    processJavaScriptForEndpoints(request);
+                }
+
                 suppressedCount.incrementAndGet();
                 logger.log(LogCategory.GRAPH, LogLevel.DEBUG, "GraphBuilder",
                         "Suppressed " + classification.getIntent() + ": "
@@ -293,6 +329,8 @@ public class GraphBuilder {
                 nd.groupId = node.getGroupId();
                 nd.extractedParams = node.getExtractedParams();
                 nd.responseData = node.getResponseData();
+                nd.classification = node.getClassification();
+                nd.endpointKey = node.getEndpointKey();
                 nodeDataList.add(nd);
             }
 
@@ -348,6 +386,8 @@ public class GraphBuilder {
                     node.setGroupId(nd.groupId);
                     if (nd.extractedParams != null) node.setExtractedParams(nd.extractedParams);
                     if (nd.responseData != null) node.setResponseData(nd.responseData);
+                    if (nd.classification != null) node.setClassification(nd.classification);
+                    if (nd.endpointKey != null) node.setEndpointKey(nd.endpointKey);
                     graph.addNode(node);
                 }
             }
@@ -362,6 +402,9 @@ public class GraphBuilder {
                     graph.addEdge(edge);
                 }
             }
+
+            // Repair next node index to avoid collisions with existing indices
+            graph.recalculateNextNodeIndex();
 
             // Rebuild inverted index
             detector.rebuildIndex();
@@ -407,6 +450,47 @@ public class GraphBuilder {
     public long getEdgesCreated() { return edgesCreated.get(); }
     public boolean isRunning() { return running.get(); }
     public long getSuppressedCount() { return suppressedCount.get(); }
+
+    /**
+     * Extract API endpoint paths from JavaScript file content using regex.
+     * Adds discovered endpoints to the ApplicationModel for LLM context.
+     */
+    private void processJavaScriptForEndpoints(CapturedRequest request) {
+        if (applicationModel == null) return;
+        String body = request.getResponseBody();
+        if (body == null || body.isEmpty()) return;
+
+        if (body.length() > 500_000) {
+            body = body.substring(0, 500_000); // cap size
+        }
+
+        int before = applicationModel.getDiscoveredEndpoints().size();
+
+        // Match API patterns commonly found in JS bundles
+        java.util.regex.Pattern apiPattern = java.util.regex.Pattern.compile(
+                "[\"'](/(?:api/|v\\d+/|graphql|rest/)[a-zA-Z0-9_/\\-{}]+)[\"']");
+        java.util.regex.Matcher matcher = apiPattern.matcher(body);
+        while (matcher.find()) {
+            String endpoint = matcher.group(1);
+            // Clean up path params like {id} -> :id for EndpointKey compatibility
+            String cleaned = endpoint.replaceAll("\\{([^}]+)\\}", ":$1");
+            String method = "GET"; // default; can refine
+            if (cleaned.contains("delete") || cleaned.contains("remove")) method = "DELETE";
+            if (cleaned.contains("create") || cleaned.contains("add") || cleaned.contains("post")) method = "POST";
+            if (cleaned.contains("update") || cleaned.contains("put") || cleaned.contains("edit")) method = "PUT";
+
+            // Use normalized form as both host and path since we don't have host context from JS
+            applicationModel.addEndpoint(
+                    new com.workflowscanner.classification.EndpointKey(
+                            method, "js-discovery", cleaned, java.util.Set.of()));
+        }
+
+        int added = applicationModel.getDiscoveredEndpoints().size() - before;
+        if (added > 0) {
+            logger.log(LogCategory.GRAPH, LogLevel.INFO, "GraphBuilder",
+                    "Discovered " + added + " API endpoints from JS: " + request.getPath());
+        }
+    }
     public long getBusinessActionCount() { return businessActionCount.get(); }
     public long getBusinessReadCount() { return businessReadCount.get(); }
     public long getAuthenticationCount() { return authenticationCount.get(); }
@@ -427,5 +511,7 @@ public class GraphBuilder {
         String groupId;
         Map<String, Object> extractedParams;
         Map<String, Object> responseData;
+        RequestClassification classification;
+        EndpointKey endpointKey;
     }
 }

@@ -54,6 +54,31 @@ public class WorkflowDetector {
     }
     
     /**
+     * Read-only preview of candidates — no scoring, no listener publishing, no side effects.
+     * Safe to call from UI refresh thread.
+     * Returns candidates segmented by session (not merged), in chronological order.
+     */
+    public List<WorkflowCandidate> previewCandidates(List<RequestNode> allNodes) {
+        if (allNodes == null || allNodes.isEmpty()) return List.of();
+
+        // Filter to workflow-relevant
+        List<RequestNode> relevantNodes = allNodes.stream()
+                .filter(n -> {
+                    RequestClassification cls = n.getClassification();
+                    return cls != null && cls.isWorkflowRelevant();
+                })
+                .toList();
+
+        // Segment by session (stateless)
+        List<WorkflowCandidate> candidates = WorkflowSessionizer.segmentFullGraph(
+                relevantNodes, config, logger);
+
+        // Chronological order
+        candidates.sort(Comparator.comparingLong(WorkflowCandidate::getStartTime));
+        return candidates;
+    }
+
+    /**
      * Set the graph and relationship detector for edge-aware detection.
      * Must be called before {@link #detect(List, RequestGraph, RelationshipDetector)}.
      */
@@ -83,44 +108,76 @@ public class WorkflowDetector {
     /**
      * Detect workflow candidates with supporting graph edge attachment.
      * Internal method that takes explicit graph references.
+     *
      * Pipeline:
-     * 1. Session-only detection (stateless)
-     * 2. Merge candidates with strong cross-candidate edges
-     * 3. Attach internal supporting edges
-     * 4. Score
-     * 5. Prioritize
+     * 1. Filter to workflow-relevant nodes
+     * 2. Segment by session (stateless, no scoring)
+     * 3. Sort chronologically by candidate start time
+     * 4. Merge candidates with strong cross-candidate edges
+     * 5. Attach internal supporting edges
+     * 6. Score once
+     * 7. Prioritize
+     *
+     * Note: Scoring happens exactly once, after merging. This avoids
+     * duplicated score evidence and ensures merged candidates get
+     * a single, accurate score.
      */
     public List<WorkflowCandidate> detect(List<RequestNode> allNodes,
                                            RequestGraph graph,
                                            RelationshipDetector detector) {
         if (allNodes == null || allNodes.isEmpty()) return List.of();
 
-        // 1. Session-only detection
-        List<WorkflowCandidate> candidates = detectSessionOnly(allNodes);
-        if (candidates.isEmpty()) return candidates;
+        // 1. Filter to workflow-relevant nodes
+        List<RequestNode> relevantNodes = new ArrayList<>();
+        int suppressedCount = 0;
+        for (RequestNode node : allNodes) {
+            RequestClassification cls = node.getClassification();
+            if (cls != null && cls.isWorkflowRelevant()) {
+                relevantNodes.add(node);
+            } else {
+                suppressedCount++;
+            }
+        }
 
-        // 2. Merge candidates with strong cross-candidate edges
+        logger.log(LogCategory.GRAPH, LogLevel.INFO, "WorkflowDetector",
+                "Filtering graph: " + allNodes.size() + " total nodes, "
+                        + relevantNodes.size() + " workflow-relevant, "
+                        + suppressedCount + " suppressed");
+
+        // 2. Segment by session (stateless, no scoring)
+        List<WorkflowCandidate> segmented = WorkflowSessionizer.segmentFullGraph(
+                relevantNodes, config, logger);
+        if (segmented.isEmpty()) return List.of();
+
+        logger.log(LogCategory.GRAPH, LogLevel.INFO, "WorkflowDetector",
+                "Segmented into " + segmented.size() + " session candidates");
+
+        // 3. Sort chronologically by candidate start time before merging
+        List<WorkflowCandidate> chronological = new ArrayList<>(segmented);
+        chronological.sort(Comparator.comparingLong(WorkflowCandidate::getStartTime));
+
+        // 4. Merge candidates with strong cross-candidate edges
         List<WorkflowCandidate> merged = mergeCandidatesByStrongEdges(
-                candidates, graph, detector);
+                chronological, graph, detector);
 
-        // 3. Attach supporting edges within each candidate
+        // 5. Attach supporting edges within each candidate
         for (WorkflowCandidate candidate : merged) {
             attachSupportingEdges(candidate, graph, detector);
         }
 
-        // 4. Score
+        // 6. Score once — after all merging and edge attachment
         for (WorkflowCandidate candidate : merged) {
             double score = scorer.score(candidate);
             candidate.setWorkflowScore(score);
         }
 
-        // 5. Prioritize
+        // 7. Prioritize
         List<WorkflowCandidate> prioritized = scorer.prioritize(merged);
 
         logger.log(LogCategory.GRAPH, LogLevel.INFO, "WorkflowDetector",
                 "Edge-aware detection: " + prioritized.size()
-                        + " candidates (merged from " + candidates.size()
-                        + " session-only candidates) with supporting edges.");
+                        + " candidates (merged from " + segmented.size()
+                        + " session candidates) with supporting edges.");
 
         lastResults = prioritized;
         return prioritized;
@@ -240,26 +297,24 @@ public class WorkflowDetector {
     /**
      * Check if two session keys are compatible for merging.
      * They merge if they share the same host and auth hash.
+     * Casts to SessionKey and uses typed accessors — never parses toString().
      */
-    private boolean sessionsCompatible(Object keyA, Object keyB) {
+    private boolean sessionsCompatible(SessionKey keyA, SessionKey keyB) {
         if (keyA == null || keyB == null) return false;
-        String a = keyA.toString();
-        String b = keyB.toString();
-        // Same session key → compatible
-        if (a.equals(b)) return true;
-        // Compatible if both have same host segment and non-empty auth
-        String[] aParts = a.split(",");
-        String[] bParts = b.split(",");
-        if (aParts.length > 0 && bParts.length > 0
-                && aParts[0].equals(bParts[0])) {
-            // Same host — if both have auth, they must match
-            if (aParts.length > 1 && bParts.length > 1) {
-                return aParts[1].equals(bParts[1]);
-            }
-            // One or both lack auth — allow merge
-            return true;
+
+        // Must share the same host
+        if (!keyA.getHost().equalsIgnoreCase(keyB.getHost())) return false;
+
+        String authA = keyA.getAuthCookieHash();
+        String authB = keyB.getAuthCookieHash();
+
+        // Both have auth — must match exactly
+        if (!authA.isEmpty() && !authB.isEmpty()) {
+            return authA.equals(authB);
         }
-        return false;
+
+        // One or both lack auth — allow merge (edge strength provides the signal)
+        return true;
     }
 
     private String firstHost(WorkflowCandidate c) {
@@ -347,6 +402,9 @@ public class WorkflowDetector {
      * Session-only detection: filter by workflow relevance, segment by session,
      * score, prioritize. No edge attachment.
      * Uses stateless full-graph segmentation — safe for UI/analysis threads.
+     *
+     * This method publishes candidate events via listeners.
+     * For read-only preview (no side effects), use {@link #previewCandidates(List)}.
      */
     public List<WorkflowCandidate> detectSessionOnly(List<RequestNode> allNodes) {
         if (allNodes == null || allNodes.isEmpty()) return List.of();

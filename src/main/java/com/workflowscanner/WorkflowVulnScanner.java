@@ -270,6 +270,9 @@ public class WorkflowVulnScanner implements BurpExtension {
             this.analysisEngine = new AnalysisEngine(graph, llmClient, config, logger);
             analysisEngine.setWorkflowDetector(workflowDetector);
             analysisEngine.setApplicationModel(applicationModel);
+            if (graphBuilder != null) {
+                graphBuilder.setApplicationModel(applicationModel);
+            }
 
             // Connect graph builder to workflow detector
             if (graphBuilder != null) {

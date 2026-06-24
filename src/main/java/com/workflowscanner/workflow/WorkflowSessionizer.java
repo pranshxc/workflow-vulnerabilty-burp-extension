@@ -131,20 +131,10 @@ public class WorkflowSessionizer {
                 }
             }
 
-            // Idle timeout check using adjacent request gap
-            // Compare current node's gap to the last step, not total duration
-            if (active != null && active.size() >= 2) {
-                RequestNode lastStep = active.getLastStep();
-                long gap = node.getTimestamp() - lastStep.getTimestamp();
-                if (gap > idleTimeoutMs) {
-                    active.setEndReason("Idle timeout (gap=" + (gap / 1000) + "s exceeds window)");
-                    active.getEvidence().addEndSignal(
-                            "idle timeout after " + (gap / 1000) + "s gap");
-                    closeAndEmit(active, completed, minSteps, logger);
-                    actives.remove(key);
-                    active = null;
-                }
-            }
+            // Idle timeout is handled by WorkflowBoundaryDetector.isBoundaryReset(),
+            // which checks the gap between adjacent nodes. This check is intentionally
+            // absent here because active.getLastStep() is the node just added, so
+            // gap would always be 0.
         }
 
         // Close any remaining active candidates (no idle check needed for full-graph)

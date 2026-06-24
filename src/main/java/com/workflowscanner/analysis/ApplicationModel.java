@@ -2,6 +2,9 @@ package com.workflowscanner.analysis;
 
 import com.workflowscanner.classification.EndpointKey;
 import com.workflowscanner.graph.RequestNode;
+import com.workflowscanner.logging.ExtensionLogger;
+import com.workflowscanner.logging.LogCategory;
+import com.workflowscanner.logging.LogLevel;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -66,6 +69,54 @@ public class ApplicationModel {
     }
 
     /**
+     * Ingest a context-read request (e.g. /api/me, /api/user, /profile).
+     * These are not workflow steps, but carry auth/user context useful for LLM prompts.
+     * Store the endpoint and extract object IDs from the response.
+     *
+     * Expected response JSON shape (parsed from extracted params):
+     * { "user_id": 123, "role": "admin", "email": "user@example.com", ... }
+     */
+    public void ingestContextRead(RequestNode node, ExtensionLogger logger) {
+        if (node == null) return;
+        EndpointKey key = node.getEndpointKey();
+        if (key != null) {
+            addEndpoint(key);
+            if (logger != null) {
+                logger.log(LogCategory.ANALYSIS, LogLevel.DEBUG, "ApplicationModel",
+                        "Context read: " + key);
+            }
+        }
+
+        // Extract user context from response fields
+        Map<String, Object> responseData = node.getResponseData();
+        if (responseData != null) {
+            for (Map.Entry<String, Object> entry : responseData.entrySet()) {
+                String name = entry.getKey().toLowerCase();
+                if (name.endsWith("_id") || name.endsWith("id")) {
+                    addObjectIdParameter(name, inferObjectType(name));
+                }
+                if (name.equals("role") || name.equals("roles")) {
+                    addObjectIdParameter(name, ObjectType.ROLE);
+                }
+            }
+        }
+    }
+
+    private static ObjectType inferObjectType(String paramName) {
+        String lower = paramName.toLowerCase();
+        if (lower.contains("user")) return ObjectType.USER;
+        if (lower.contains("order")) return ObjectType.ORDER;
+        if (lower.contains("payment") || lower.contains("pay")) return ObjectType.PAYMENT;
+        if (lower.contains("cart")) return ObjectType.CART;
+        if (lower.contains("invoice")) return ObjectType.INVOICE;
+        if (lower.contains("product")) return ObjectType.PRODUCT;
+        if (lower.contains("account")) return ObjectType.ACCOUNT;
+        if (lower.contains("org")) return ObjectType.ORGANIZATION;
+        if (lower.contains("file")) return ObjectType.FILE;
+        return ObjectType.UNKNOWN;
+    }
+
+    /**
      * Build application model context from a list of nodes in a candidate.
      * Learns endpoints per-node, then infers state transitions from adjacent pairs.
      */
@@ -110,6 +161,8 @@ public class ApplicationModel {
      * Infer a state transition between two adjacent steps in a workflow.
      * The "from state" is the previous step's path family (2 segments),
      * the "to state" is the current step's path family.
+     * If domain semantic rules apply (e.g. cart -> checkout), use those
+     * instead of raw path family.
      */
     private void inferTransition(RequestNode prev, RequestNode curr) {
         String fromState = extractStateKey(prev);
@@ -117,7 +170,33 @@ public class ApplicationModel {
         if (fromState == null || toState == null || fromState.equals(toState)) return;
 
         String endpoint = curr.getMethod() + " " + (curr.getPath() != null ? curr.getPath() : "");
-        addStateTransition(fromState, toState, endpoint);
+
+        // Domain semantic rules — recognize known workflow state transitions
+        String from = fromState.toLowerCase();
+        String to = toState.toLowerCase();
+        String semanticFrom = from;
+        String semanticTo = to;
+
+        if (from.contains("cart") && to.contains("checkout")) {
+            semanticFrom = "cart";
+            semanticTo = "checkout";
+        } else if ((from.contains("cart") || from.contains("checkout"))
+                && (to.contains("payment") || to.contains("pay"))) {
+            semanticFrom = from.contains("checkout") ? "checkout" : "cart";
+            semanticTo = "payment";
+        } else if ((from.contains("payment") || from.contains("pay"))
+                && (to.contains("order") || to.contains("confirm") || to.contains("success"))) {
+            semanticFrom = "payment";
+            semanticTo = "order_confirmed";
+        } else if (from.contains("login") && !to.contains("login")) {
+            semanticFrom = "login";
+            semanticTo = "post_login";
+        } else if (from.contains("register") && !to.contains("register")) {
+            semanticFrom = "register";
+            semanticTo = "post_registration";
+        }
+
+        addStateTransition(semanticFrom, semanticTo, endpoint);
     }
 
     /**

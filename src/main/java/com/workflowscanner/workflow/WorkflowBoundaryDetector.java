@@ -47,8 +47,21 @@ public class WorkflowBoundaryDetector {
             if (path.contains("/init") || path.contains("/initialize")) return true;
         }
 
-        // 201 Created = resource was just created (workflow start)
-        if (node.getStatusCode() == 201) return true;
+        // 201 Created — use as signal, not hard boundary
+        // Only treat as start if the path suggests a creation workflow
+        if (node.getStatusCode() == 201) {
+            if (path.contains("/start") || path.contains("/begin")
+                    || path.contains("/init") || path.contains("/initialize")) {
+                return true;
+            }
+            // POST to a new-resource path typically opens a workflow, not ends one
+            if (BusinessKeywordRules.isStateChanging(method)
+                    && (path.matches(".*/api/.*") || path.contains("create"))) {
+                return false; // Let continuesWorkflow/evidence handle it
+            }
+            // By default, don't treat 201 as a hard start
+            return false;
+        }
 
         return false;
     }
@@ -104,8 +117,17 @@ public class WorkflowBoundaryDetector {
                 || path.contains("/success") || path.contains("/complete")
                 || path.contains("/done")) return true;
 
-        // 201 Created (resource created)
-        if (node.getStatusCode() == 201) return true;
+        // 201 Created — use as signal, not hard end boundary
+        // Only treat as end if the path suggests a terminal action
+        if (node.getStatusCode() == 201) {
+            // POST to a completion endpoint = workflow end
+            if (path.contains("/complete") || path.contains("/finish")
+                    || path.contains("/confirm") || path.contains("/success")) {
+                return true;
+            }
+            // Otherwise, 201 is mid-workflow (e.g., adding items to cart)
+            return false;
+        }
 
         // 303 redirect to a result page
         if (node.getStatusCode() == 303) return true;

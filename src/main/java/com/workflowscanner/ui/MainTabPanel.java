@@ -26,6 +26,7 @@ public class MainTabPanel {
     private final JTabbedPane tabbedPane;
     private SettingsPanel settingsPanel;
     private StatusBarPanel statusBar;
+    private GraphPanel graphPanel;
 
     public MainTabPanel(MontoyaApi api, ExtensionConfig config, ExtensionLogger logger,
                         RequestGraph graph, GraphBuilder graphBuilder, RequestPipeline pipeline,
@@ -71,8 +72,8 @@ public class MainTabPanel {
         tabbedPane.addTab("Log", logPanel);
 
         // Graph tab
-        GraphPanel graphExplorer = new GraphPanel(api, graph, analysisEngine, logger);
-        tabbedPane.addTab("Graph", graphExplorer);
+        graphPanel = new GraphPanel(api, graph, analysisEngine, logger);
+        tabbedPane.addTab("Graph", graphPanel);
 
         mainPanel.add(tabbedPane, BorderLayout.CENTER);
 
@@ -113,6 +114,9 @@ public class MainTabPanel {
         }
         if (statusBar != null) {
             statusBar.stopUpdates();
+        }
+        if (graphPanel != null) {
+            graphPanel.dispose();
         }
     }
 }

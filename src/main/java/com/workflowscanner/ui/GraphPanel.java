@@ -214,8 +214,16 @@ public class GraphPanel extends JPanel {
 
         // Get workflow candidates (if detector available) or fallback to connected components
         List<WorkflowCandidate> candidates;
-        if (workflowDetector != null && graph != null) {
-            candidates = graph.detectWorkflowCandidates(workflowDetector);
+        if (workflowDetector != null) {
+            // Use last results if available (read-only, no side effects)
+            List<WorkflowCandidate> lastResults = workflowDetector.getLastResults();
+            if (!lastResults.isEmpty()) {
+                candidates = lastResults;
+            } else {
+                // Preview candidates without scoring or side effects
+                candidates = workflowDetector.previewCandidates(
+                        new ArrayList<>(graph.getNodes().values()));
+            }
             // Filter to display-worthy candidates only
             candidates = candidates.stream()
                     .filter(c -> c.getWorkflowScore() >= displayThreshold)

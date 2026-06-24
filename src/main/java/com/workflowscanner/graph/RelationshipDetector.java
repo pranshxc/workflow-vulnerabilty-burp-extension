@@ -103,9 +103,8 @@ public class RelationshipDetector {
     }
 
     private boolean isBusinessValueFlow(RequestEdge edge) {
-        // PARAM_REUSE edges containing business IDs or tokens are strong
-        // This is a heuristic based on evidence text — could be improved
-        return edge.getConfidence() >= 0.8;
+        // Use the edge's own ValueKind-based check rather than raw confidence
+        return edge != null && edge.isBusinessValueFlow();
     }
 
     private boolean isBusinessRelevant(RequestNode node) {
