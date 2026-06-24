@@ -3,6 +3,7 @@ package com.workflowscanner.workflow;
 import com.workflowscanner.classification.BusinessKeywordRules;
 import com.workflowscanner.classification.RequestIntent;
 import com.workflowscanner.classification.RequestClassification;
+import com.workflowscanner.config.ExtensionConfig;
 import com.workflowscanner.graph.EdgeType;
 import com.workflowscanner.graph.RequestEdge;
 import com.workflowscanner.graph.RequestNode;
@@ -15,19 +16,19 @@ import java.util.Set;
  * Scores workflow candidates for vulnerability analysis priority.
  * Higher scores indicate workflows more likely to contain exploitable vulnerabilities.
  *
- * Only candidates with score >= threshold are sent to the LLM.
- * Score < 10 are suppressed entirely.
- * Score 10-19 are shown as candidates only (no LLM).
+ * Scores read from ExtensionConfig: >= workflowScoreThreshold → LLM analysis,
+ * >= workflowCandidateThreshold → display only, below → suppressed.
  */
 public class WorkflowScorer {
 
-    /** Minimum score for LLM analysis */
-    public static final double ANALYSIS_THRESHOLD = 20.0;
-    /** Minimum score for candidate display (below this = suppressed) */
-    public static final double DISPLAY_THRESHOLD = 10.0;
+    private final ExtensionConfig config;
+
+    public WorkflowScorer(ExtensionConfig config) {
+        this.config = config;
+    }
 
     /**
-     * Score a workflow candidate.
+     * Score a workflow candidate and populate evidence breakdown.
      */
     public double score(WorkflowCandidate candidate) {
         if (candidate == null || candidate.getSteps().isEmpty()) return 0.0;
@@ -38,17 +39,34 @@ public class WorkflowScorer {
         double score = 0.0;
 
         // Positive signals
-        score += scoreStateChangingMethods(steps);
-        score += scoreBusinessKeywords(steps);
-        score += scoreObjectFlows(candidate);
-        score += scoreMethodDiversity(steps);
-        score += scoreStructuralSignals(steps, edges);
+        double stateChangeScore = scoreStateChangingMethods(steps);
+        double keywordScore = scoreBusinessKeywords(steps);
+        double objectFlowScore = scoreObjectFlows(candidate);
+        double diversityScore = scoreMethodDiversity(steps);
+        double structuralScore = scoreStructuralSignals(steps, edges);
+
+        score += stateChangeScore;
+        score += keywordScore;
+        score += objectFlowScore;
+        score += diversityScore;
+        score += structuralScore;
 
         // Negative signals (penalties)
-        score -= penalizeStaticContent(steps);
-        score -= penalizePolling(steps);
-        score -= penalizeWeakStructure(steps, edges);
-        score -= penalizeRepetition(steps);
+        double penaltyScore = penalizeStaticContent(steps);
+        penaltyScore += penalizePolling(steps);
+        penaltyScore += penalizeWeakStructure(steps, edges);
+        penaltyScore += penalizeRepetition(steps);
+        score -= penaltyScore;
+
+        // Populate evidence with score breakdown
+        WorkflowEvidence evidence = candidate.getEvidence();
+        if (stateChangeScore > 0) evidence.addObjectFlow(String.format("score:state-change=%.1f", stateChangeScore));
+        if (keywordScore > 0) evidence.addObjectFlow(String.format("score:keywords=%.1f", keywordScore));
+        if (objectFlowScore > 0) evidence.addObjectFlow(String.format("score:object-flows=%.1f", objectFlowScore));
+        if (diversityScore > 0) evidence.addObjectFlow(String.format("score:diversity=%.1f", diversityScore));
+        if (structuralScore > 0) evidence.addObjectFlow(String.format("score:structural=%.1f", structuralScore));
+        if (penaltyScore > 0) evidence.addObjectFlow(String.format("score:penalties=-%.1f", penaltyScore));
+        evidence.setConfidence(Math.min(1.0, score / 100.0));
 
         return score;
     }

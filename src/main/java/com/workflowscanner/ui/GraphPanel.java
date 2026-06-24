@@ -3,6 +3,7 @@ package com.workflowscanner.ui;
 import burp.api.montoya.MontoyaApi;
 import com.workflowscanner.analysis.AnalysisEngine;
 import com.workflowscanner.analysis.ChainVerdict;
+import com.workflowscanner.config.ExtensionConfig;
 import com.workflowscanner.graph.EdgeType;
 import com.workflowscanner.graph.RequestEdge;
 import com.workflowscanner.graph.RequestGraph;
@@ -11,6 +12,8 @@ import com.workflowscanner.llm.LLMAnalysisResult;
 import com.workflowscanner.logging.ExtensionLogger;
 import com.workflowscanner.logging.LogCategory;
 import com.workflowscanner.logging.LogLevel;
+import com.workflowscanner.workflow.WorkflowCandidate;
+import com.workflowscanner.workflow.WorkflowDetector;
 
 import javax.swing.*;
 import javax.swing.border.TitledBorder;
@@ -35,6 +38,10 @@ public class GraphPanel extends JPanel {
     private final AnalysisEngine analysisEngine;
     private final ExtensionLogger logger;
 
+    // Workflow candidate display (added in workflow rework)
+    private WorkflowDetector workflowDetector;
+    private ExtensionConfig config;
+
     // Chain list (left)
     private DefaultListModel<ChainItem> chainListModel;
     private JList<ChainItem> chainList;
@@ -54,10 +61,18 @@ public class GraphPanel extends JPanel {
 
     public GraphPanel(MontoyaApi api, RequestGraph graph, AnalysisEngine analysisEngine,
                       ExtensionLogger logger) {
+        this(api, graph, analysisEngine, logger, null, null);
+    }
+
+    public GraphPanel(MontoyaApi api, RequestGraph graph, AnalysisEngine analysisEngine,
+                      ExtensionLogger logger,
+                      WorkflowDetector workflowDetector, ExtensionConfig config) {
         this.api = api;
         this.graph = graph;
         this.analysisEngine = analysisEngine;
         this.logger = logger;
+        this.workflowDetector = workflowDetector;
+        this.config = config;
 
         setLayout(new BorderLayout());
 
@@ -174,15 +189,49 @@ public class GraphPanel extends JPanel {
         return panel;
     }
 
+    /**
+     * Set the workflow detector for candidate-based display.
+     */
+    public void setWorkflowDetector(WorkflowDetector detector) {
+        this.workflowDetector = detector;
+    }
+
+    /**
+     * Set the config (for threshold display).
+     */
+    public void setConfig(ExtensionConfig config) {
+        this.config = config;
+    }
+
     // ========================================================================
     // Data Refresh
     // ========================================================================
 
     private void refreshChainList() {
-        List<List<RequestNode>> chains = graph.getWorkflowChains();
+        double displayThreshold = config != null
+                ? config.getWorkflowCandidateThreshold() : 10.0;
+
+        // Get workflow candidates (if detector available) or fallback to connected components
+        List<WorkflowCandidate> candidates;
+        if (workflowDetector != null && graph != null) {
+            candidates = graph.detectWorkflowCandidates(workflowDetector);
+            // Filter to display-worthy candidates only
+            candidates = candidates.stream()
+                    .filter(c -> c.getWorkflowScore() >= displayThreshold)
+                    .toList();
+        } else {
+            // Fallback: show connected components as "chains"
+            candidates = new ArrayList<>();
+            for (List<RequestNode> component : graph.getConnectedComponents()) {
+                WorkflowCandidate fallback = new WorkflowCandidate();
+                for (RequestNode node : component) fallback.addStep(node);
+                fallback.setWorkflowType(com.workflowscanner.workflow.WorkflowType.UNKNOWN_BUSINESS_FLOW);
+                candidates.add(fallback);
+            }
+        }
 
         // Update host filter
-        Set<String> hosts = graph.getAllHosts();
+        Set<String> hosts = graph != null ? graph.getAllHosts() : Set.of();
         String currentHost = (String) hostFilter.getSelectedItem();
         hostFilter.removeAllItems();
         hostFilter.addItem("All hosts");
@@ -191,27 +240,28 @@ public class GraphPanel extends JPanel {
 
         // Filter by host
         String filterHost = (String) hostFilter.getSelectedItem();
-        List<List<RequestNode>> filtered = new ArrayList<>();
-        for (List<RequestNode> chain : chains) {
-            if ("All hosts".equals(filterHost) || chainContainsHost(chain, filterHost)) {
-                filtered.add(chain);
+        List<WorkflowCandidate> filtered = new ArrayList<>();
+        for (WorkflowCandidate candidate : candidates) {
+            if ("All hosts".equals(filterHost) || candidateContainsHost(candidate, filterHost)) {
+                filtered.add(candidate);
             }
         }
 
         // Build chain items with verdict info
         chainListModel.clear();
         for (int i = 0; i < filtered.size(); i++) {
-            List<RequestNode> chain = filtered.get(i);
-            String fingerprint = ChainVerdict.generateFingerprint(chain);
-            ChainVerdict verdict = analysisEngine.getVerdictByFingerprint(fingerprint);
-            chainListModel.addElement(new ChainItem(i + 1, chain, verdict));
+            WorkflowCandidate candidate = filtered.get(i);
+            String fingerprint = ChainVerdict.generateFingerprint(candidate.getSteps());
+            ChainVerdict verdict = analysisEngine != null
+                    ? analysisEngine.getVerdictByFingerprint(fingerprint) : null;
+            chainListModel.addElement(new ChainItem(i + 1, candidate, verdict));
         }
 
-        chainCountLabel.setText("Chains: " + filtered.size());
+        chainCountLabel.setText("Candidates: " + filtered.size());
     }
 
-    private boolean chainContainsHost(List<RequestNode> chain, String host) {
-        for (RequestNode node : chain) {
+    private boolean candidateContainsHost(WorkflowCandidate candidate, String host) {
+        for (RequestNode node : candidate.getSteps()) {
             if (host != null && host.equalsIgnoreCase(node.getHost())) return true;
         }
         return false;
@@ -225,17 +275,38 @@ public class GraphPanel extends JPanel {
         ChainItem item = chainList.getSelectedValue();
         if (item == null) return;
 
-        selectedChain = item.chain;
+        selectedChain = item.candidate.getSteps();
         selectedNode = null;
 
         // Update graph view
         List<RequestEdge> chainEdges = new ArrayList<>();
-        for (RequestNode node : item.chain) {
+        // Show both graph edges between steps AND supporting edges
+        for (RequestNode node : selectedChain) {
             chainEdges.addAll(graph.getEdgesForNode(node.getId()));
         }
-        graphView.setChain(item.chain, chainEdges, item.verdict);
+        chainEdges.addAll(item.candidate.getSupportingEdges());
+        graphView.setChain(selectedChain, chainEdges, item.verdict);
 
-        nodeDetailArea.setText("Select a node in the graph view above.");
+        // Show candidate info in detail area
+        StringBuilder sb = new StringBuilder();
+        sb.append("Candidate: ").append(item.candidate.getId()).append("\n");
+        sb.append("Score: ").append(String.format("%.1f", item.candidate.getWorkflowScore())).append("\n");
+        sb.append("Type: ").append(item.candidate.getWorkflowType()).append("\n");
+        sb.append("Steps: ").append(item.candidate.size()).append("\n");
+        sb.append("Session: ").append(item.candidate.getSessionKey()).append("\n");
+        sb.append("Supporting edges: ").append(item.candidate.getSupportingEdges().size()).append("\n\n");
+
+        // Evidence summary
+        String evidenceSummary = item.candidate.getEvidence().summarize();
+        if (!evidenceSummary.isEmpty()) {
+            sb.append("Evidence:\n").append(evidenceSummary).append("\n\n");
+        }
+
+        if (item.verdict != null) {
+            sb.append("Analysis: ").append(item.verdict.getOverallVerdict()).append("\n");
+        }
+        sb.append("Select a node in the graph view above for details.");
+        nodeDetailArea.setText(sb.toString());
     }
 
     private void onNodeSelected(RequestNode node) {
@@ -284,7 +355,8 @@ public class GraphPanel extends JPanel {
         // Analysis verdict
         ChainItem item = chainList.getSelectedValue();
         if (item != null && item.verdict != null && item.verdict.getNodeResults() != null) {
-            int idx = item.chain.indexOf(node);
+            List<RequestNode> steps = item.candidate.getSteps();
+            int idx = steps.indexOf(node);
             if (idx >= 0 && idx < item.verdict.getNodeResults().size()) {
                 LLMAnalysisResult result = item.verdict.getNodeResults().get(idx);
                 if (result != null) {
@@ -318,10 +390,11 @@ public class GraphPanel extends JPanel {
     }
 
     private void analyzeSelectedNode() {
-        if (selectedChain == null || selectedChain.isEmpty()) return;
+        ChainItem item = chainList.getSelectedValue();
+        if (item == null || item.candidate == null) return;
         logger.log(LogCategory.ANALYSIS, LogLevel.INFO, "GraphPanel",
-                "User triggered analysis for selected chain.");
-        analysisEngine.analyzeChain(selectedChain, true);
+                "User triggered analysis for workflow candidate " + item.candidate.getId());
+        analysisEngine.analyzeCandidate(item.candidate, true);
     }
 
     private void sendToRepeater() {
@@ -558,24 +631,30 @@ public class GraphPanel extends JPanel {
 
     private static class ChainItem {
         final int index;
-        final List<RequestNode> chain;
+        final WorkflowCandidate candidate;
         final ChainVerdict verdict;
 
-        ChainItem(int index, List<RequestNode> chain, ChainVerdict verdict) {
+        ChainItem(int index, WorkflowCandidate candidate, ChainVerdict verdict) {
             this.index = index;
-            this.chain = chain;
+            this.candidate = candidate;
             this.verdict = verdict;
         }
 
         String getStatusIcon() {
-            if (verdict == null) return "\u25CB"; // empty circle
+            if (verdict == null) {
+                if (candidate.getWorkflowScore() >= 20) return "\u25B6"; // play
+                return "\u25CB"; // empty circle
+            }
             if (verdict.isVulnerable()) return "\u2605"; // star
             if (verdict.isSuspicious()) return "\u26A0"; // warning
             return "\u2713"; // checkmark
         }
 
         Color getStatusColor() {
-            if (verdict == null) return Color.GRAY;
+            if (verdict == null) {
+                if (candidate.getWorkflowScore() >= 20) return new Color(0, 100, 200); // blue for analysis-ready
+                return Color.GRAY;
+            }
             if (verdict.isVulnerable()) return Color.RED;
             if (verdict.isSuspicious()) return new Color(200, 150, 0);
             return new Color(0, 128, 0);
@@ -594,9 +673,16 @@ public class GraphPanel extends JPanel {
             super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus);
             if (value instanceof ChainItem) {
                 ChainItem item = (ChainItem) value;
-                String host = item.chain.isEmpty() ? "?" : item.chain.get(0).getHost();
-                setText(item.getStatusIcon() + " Chain " + item.index
-                        + " (" + item.chain.size() + " nodes) - " + host);
+                String host = item.candidate.getSteps().isEmpty()
+                        ? "?" : item.candidate.getSteps().get(0).getHost();
+                setText(String.format("%s [%.0f] %s %s (%d) - %s",
+                        item.getStatusIcon(),
+                        item.candidate.getWorkflowScore(),
+                        item.candidate.getWorkflowType().name().substring(0, Math.min(4,
+                                item.candidate.getWorkflowType().name().length())),
+                        item.candidate.getId(),
+                        item.candidate.size(),
+                        host));
                 if (!isSelected) {
                     setForeground(item.getStatusColor());
                 }

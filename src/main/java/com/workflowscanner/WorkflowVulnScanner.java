@@ -26,6 +26,9 @@ import com.workflowscanner.workflow.WorkflowDetector;
 import com.workflowscanner.workflow.WorkflowCandidate;
 
 import java.util.List;
+import java.util.Timer;
+import java.util.TimerTask;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Workflow Vulnerability Scanner - Burp Suite Extension
@@ -49,6 +52,11 @@ public class WorkflowVulnScanner implements BurpExtension {
     private MontoyaApi api;
     private ExtensionLogger logger;
     private ExtensionConfig config;
+    
+    // Auto-analysis debounce
+    private final AtomicBoolean autoAnalysisScheduled = new AtomicBoolean(false);
+    private Timer autoAnalysisTimer;
+    
     private EventBus eventBus;
     private RequestGraph graph;
     private RequestPipeline pipeline;
@@ -249,7 +257,13 @@ public class WorkflowVulnScanner implements BurpExtension {
     private void initAnalysisEngine() {
         try {
             this.applicationModel = new ApplicationModel();
-            this.workflowDetector = new WorkflowDetector(logger);
+            this.workflowDetector = new WorkflowDetector(config, logger);
+            
+            // Set graph context for edge-aware detection
+            if (graphBuilder != null && graphBuilder.getDetector() != null) {
+                workflowDetector.setGraphContext(graph, graphBuilder.getDetector());
+            }
+            
             this.analysisEngine = new AnalysisEngine(graph, llmClient, config, logger);
             analysisEngine.setWorkflowDetector(workflowDetector);
             analysisEngine.setApplicationModel(applicationModel);
@@ -260,7 +274,7 @@ public class WorkflowVulnScanner implements BurpExtension {
             }
 
             logger.log(LogCategory.EXTENSION, LogLevel.INFO, "WorkflowVulnScanner",
-                    "Analysis engine initialized with WorkflowDetector.");
+                    "Analysis engine initialized with WorkflowDetector (edge-aware).");
         } catch (Exception e) {
             logger.log(LogCategory.ERROR, LogLevel.ERROR, "WorkflowVulnScanner",
                     "Failed to initialize analysis engine.", e);
@@ -303,10 +317,26 @@ public class WorkflowVulnScanner implements BurpExtension {
             if (graphBuilder != null && analysisEngine != null) {
                 graphBuilder.addGraphUpdateListener(() -> {
                     if (config.isAutoAnalyzeNewChains() && !analysisEngine.isRunning()) {
-                        logger.log(LogCategory.ANALYSIS, LogLevel.INFO, "Pipeline",
-                                "Graph updated, triggering auto-analysis.");
-                        eventBus.publish(EventBus.Event.GRAPH_UPDATED);
-                        analysisEngine.start();
+                        // Debounce: reset timer on each graph update (2s debounce window)
+                        if (autoAnalysisTimer == null) {
+                            autoAnalysisTimer = new Timer("auto-analysis-debounce", true);
+                        }
+                        // Cancel pending execution if one is scheduled
+                        if (autoAnalysisScheduled.getAndSet(true)) {
+                            autoAnalysisTimer.purge();
+                        }
+                        autoAnalysisTimer.schedule(new TimerTask() {
+                            @Override
+                            public void run() {
+                                if (!analysisEngine.isRunning()) {
+                                    autoAnalysisScheduled.set(false);
+                                    logger.log(LogCategory.ANALYSIS, LogLevel.INFO, "Pipeline",
+                                            "Graph updated (debounced), triggering auto-analysis.");
+                                    eventBus.publish(EventBus.Event.GRAPH_UPDATED);
+                                    analysisEngine.start();
+                                }
+                            }
+                        }, 2000L); // 2-second debounce
                     }
                 });
             }
@@ -368,6 +398,12 @@ public class WorkflowVulnScanner implements BurpExtension {
         try {
             this.mainTabPanel = new MainTabPanel(api, config, logger, graph, graphBuilder,
                     pipeline, llmClient, analysisEngine, advisoryManager, backfillService, healthCheck);
+            
+            // Wire workflow detector and config into UI sub-panels
+            if (mainTabPanel != null && workflowDetector != null) {
+                mainTabPanel.setWorkflowDetector(workflowDetector, config);
+            }
+            
             api.userInterface().registerSuiteTab(EXTENSION_NAME, mainTabPanel.getComponent());
             logger.log(LogCategory.EXTENSION, LogLevel.INFO, "WorkflowVulnScanner",
                     "UI panels registered with status bar.");

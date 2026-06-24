@@ -174,10 +174,10 @@ public class RequestGraph {
      * @return sorted list of workflow candidates (highest score first)
      */
     public List<WorkflowCandidate> detectWorkflowCandidates(WorkflowDetector detector) {
+        // Use the edge-aware overload that requires graph + relationship detector access
+        // The detector receives graph context through its internal graph reference
         List<WorkflowCandidate> candidates = detector.detect(
                 new ArrayList<>(nodes.values()));
-        // Filter candidates with insufficient workflow relevance
-        candidates.removeIf(c -> c.getWorkflowScore() < 10);
         // Sort by score descending
         candidates.sort((a, b) -> Double.compare(b.getWorkflowScore(), a.getWorkflowScore()));
         return candidates;
@@ -253,9 +253,9 @@ public class RequestGraph {
     }
 
     public GraphStats getStats() {
-        List<List<RequestNode>> chains = getWorkflowChains();
-        int maxChainLength = chains.isEmpty() ? 0 : chains.get(0).size();
-        return new GraphStats(nodes.size(), edges.size(), chains.size(),
+        List<List<RequestNode>> components = getConnectedComponents();
+        int maxChainLength = components.isEmpty() ? 0 : components.get(0).size();
+        return new GraphStats(nodes.size(), edges.size(), components.size(),
                 maxChainLength, getAllHosts().size());
     }
 

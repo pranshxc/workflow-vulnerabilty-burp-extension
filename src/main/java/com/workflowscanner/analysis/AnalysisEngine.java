@@ -168,12 +168,29 @@ public class AnalysisEngine {
                 return;
             }
 
-            totalCandidates.set(candidates.size());
+            // Filter to analysis-ready candidates (respect configured threshold)
+            double analysisThreshold = config.getWorkflowScoreThreshold();
+            List<WorkflowCandidate> analysisCandidates = candidates.stream()
+                    .filter(c -> c.getWorkflowScore() >= analysisThreshold)
+                    .toList();
+
+            if (analysisCandidates.isEmpty()) {
+                logger.log(LogCategory.ANALYSIS, LogLevel.INFO, "AnalysisEngine",
+                        "No candidates above analysis threshold (" + analysisThreshold
+                                + "). Found " + candidates.size()
+                                + " display-only candidates.");
+                running.set(false);
+                return;
+            }
+
+            totalCandidates.set(analysisCandidates.size());
 
             logger.log(LogCategory.ANALYSIS, LogLevel.INFO, "AnalysisEngine",
-                    "Starting analysis of " + candidates.size() + " workflow candidates.");
+                    "Starting analysis of " + analysisCandidates.size()
+                            + "/" + candidates.size() + " workflow candidates "
+                            + "(threshold: " + analysisThreshold + ").");
 
-            // 2. Build ApplicationModel from candidates
+            // 2. Build ApplicationModel from all candidates (including display-only)
             for (WorkflowCandidate candidate : candidates) {
                 for (RequestNode step : candidate.getSteps()) {
                     if (step != null) {
@@ -182,8 +199,8 @@ public class AnalysisEngine {
                 }
             }
 
-            // 3. Analyze each candidate
-            for (int i = 0; i < candidates.size(); i++) {
+            // 3. Analyze each analysis-eligible candidate
+            for (int i = 0; i < analysisCandidates.size(); i++) {
                 if (!running.get()) break;
 
                 // Pause support
@@ -194,7 +211,7 @@ public class AnalysisEngine {
                     }
                 }
 
-                WorkflowCandidate candidate = candidates.get(i);
+                WorkflowCandidate candidate = analysisCandidates.get(i);
                 String fingerprint = ChainVerdict.generateFingerprint(candidate.getSteps());
 
                 // Skip already-analyzed

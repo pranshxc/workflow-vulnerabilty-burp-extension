@@ -3,6 +3,7 @@ package com.workflowscanner.workflow;
 import com.workflowscanner.classification.BusinessKeywordRules;
 import com.workflowscanner.classification.RequestIntent;
 import com.workflowscanner.classification.RequestClassification;
+import com.workflowscanner.config.ExtensionConfig;
 import com.workflowscanner.graph.RequestNode;
 
 /**
@@ -11,8 +12,11 @@ import com.workflowscanner.graph.RequestNode;
  */
 public class WorkflowBoundaryDetector {
 
-    /** Idle timeout in ms — if no same-session requests arrive, close the candidate */
-    public static final long IDLE_TIMEOUT_MS = 30_000;
+    private final long idleTimeoutMs;
+
+    public WorkflowBoundaryDetector(ExtensionConfig config) {
+        this.idleTimeoutMs = config.getWorkflowSessionWindowMs();
+    }
 
     /**
      * Check if a node signals the start of a new workflow.
@@ -122,6 +126,8 @@ public class WorkflowBoundaryDetector {
 
     /**
      * Check if there's a boundary reset between two nodes (new workflow should start).
+     * Checks continuesWorkflow BEFORE startsWorkflow to avoid over-splitting
+     * real workflows that happen to also match start patterns.
      */
     public boolean isBoundaryReset(RequestNode previous, RequestNode current) {
         if (previous == null || current == null) return true;
@@ -129,15 +135,19 @@ public class WorkflowBoundaryDetector {
         // Different host = definitely a reset
         if (!sameHost(previous, current)) return true;
 
-        // Large time gap
+        // Large time gap (use configurable session window)
         long gap = current.getTimestamp() - previous.getTimestamp();
-        if (gap > IDLE_TIMEOUT_MS) return true;
+        if (gap > idleTimeoutMs) return true;
+
+        // If current continues the previous workflow, it's NOT a reset
+        // even if it also matches a start pattern
+        if (continuesWorkflow(previous, current)) return false;
 
         // Logout before current request
         String prevPath = previous.getPath() != null ? previous.getPath().toLowerCase() : "";
         if (prevPath.contains("logout") || prevPath.contains("signout")) return true;
 
-        // Start of a new, different workflow type
+        // Start of a new, different workflow type (only if not continuing previous)
         if (startsWorkflow(current)) return true;
 
         // Classification changed from business action to static/background

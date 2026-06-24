@@ -11,6 +11,7 @@ import com.workflowscanner.graph.GraphBuilder;
 import com.workflowscanner.graph.RequestGraph;
 import com.workflowscanner.llm.LLMClient;
 import com.workflowscanner.logging.ExtensionLogger;
+import com.workflowscanner.workflow.WorkflowDetector;
 
 import javax.swing.*;
 import java.awt.*;
@@ -79,6 +80,20 @@ public class MainTabPanel {
         if (healthCheck != null) {
             statusBar = new StatusBarPanel(healthCheck);
             mainPanel.add(statusBar, BorderLayout.SOUTH);
+        }
+    }
+
+    /**
+     * Wire the workflow detector and config into sub-panels that need them.
+     * Called after construction when the detector is available.
+     */
+    public void setWorkflowDetector(WorkflowDetector detector, ExtensionConfig config) {
+        for (int i = 0; i < tabbedPane.getTabCount(); i++) {
+            Component c = tabbedPane.getComponentAt(i);
+            if (c instanceof GraphPanel) {
+                ((GraphPanel) c).setWorkflowDetector(detector);
+                ((GraphPanel) c).setConfig(config);
+            }
         }
     }
 
