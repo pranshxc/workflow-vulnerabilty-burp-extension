@@ -1,6 +1,7 @@
 package com.workflowscanner.analysis;
 
 import com.workflowscanner.config.ExtensionConfig;
+import com.workflowscanner.graph.EdgeType;
 import com.workflowscanner.graph.RequestEdge;
 import com.workflowscanner.graph.RequestGraph;
 import com.workflowscanner.graph.RequestNode;
@@ -14,6 +15,9 @@ import com.workflowscanner.llm.SystemPrompt;
 import com.workflowscanner.logging.ExtensionLogger;
 import com.workflowscanner.logging.LogCategory;
 import com.workflowscanner.logging.LogLevel;
+import com.workflowscanner.workflow.WorkflowCandidate;
+import com.workflowscanner.workflow.WorkflowDetector;
+import com.workflowscanner.workflow.WorkflowType;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -32,20 +36,13 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
 /**
- * Orchestrates workflow chain analysis by:
- * 1. Selecting and prioritizing chains from the graph
- * 2. Running heuristic pre-filters
- * 3. Feeding nodes to the LLM in chronological order with accumulated context
- * 4. Aggregating node-level results into chain-level verdicts
+ * Orchestrates workflow vulnerability analysis using a 3-prompt structure:
+ * 1. <b>Classify</b> – Is this candidate a real workflow? What business purpose?
+ * 2. <b>Hypotheses</b> – What could go wrong? Generate vulnerability hypotheses.
+ * 3. <b>Validate</b> – For each hypothesis, propose a validation plan.
  *
- * Features:
- * - Background thread pool with configurable concurrency
- * - Priority-ordered analysis queue
- * - Pause/resume/cancel controls
- * - Progress tracking for UI
- * - Deduplication via chain fingerprint caching
- * - Force re-analysis support
- * - Comprehensive logging
+ * Replaces the old node-by-node per-node LLM approach with candidate-level
+ * analysis that includes ApplicationModel context and WorkflowDetector output.
  */
 public class AnalysisEngine {
 
@@ -53,8 +50,10 @@ public class AnalysisEngine {
     private final LLMClient llmClient;
     private final ExtensionConfig config;
     private final ExtensionLogger logger;
-    private final ChainPrioritizer prioritizer;
     private final HeuristicPreFilter preFilter;
+
+    private WorkflowDetector workflowDetector;
+    private ApplicationModel applicationModel;
 
     private ExecutorService executor;
     private final AtomicBoolean running = new AtomicBoolean(false);
@@ -65,11 +64,11 @@ public class AnalysisEngine {
     private final List<ChainVerdict> allVerdicts = new CopyOnWriteArrayList<>();
 
     // Progress tracking
-    private final AtomicInteger totalChains = new AtomicInteger(0);
-    private final AtomicInteger completedChains = new AtomicInteger(0);
-    private final AtomicInteger currentChainNodes = new AtomicInteger(0);
-    private final AtomicInteger currentNodeProgress = new AtomicInteger(0);
-    private volatile String currentChainId = "";
+    private final AtomicInteger totalCandidates = new AtomicInteger(0);
+    private final AtomicInteger completedCandidates = new AtomicInteger(0);
+    private final AtomicInteger currentCandidateSteps = new AtomicInteger(0);
+    private final AtomicInteger currentStepProgress = new AtomicInteger(0);
+    private volatile String currentCandidateId = "";
 
     // Statistics
     private final AtomicLong totalLLMCalls = new AtomicLong(0);
@@ -84,13 +83,27 @@ public class AnalysisEngine {
         this.llmClient = llmClient;
         this.config = config;
         this.logger = logger;
-        this.prioritizer = new ChainPrioritizer();
         this.preFilter = new HeuristicPreFilter();
+        this.applicationModel = new ApplicationModel();
         this.executor = Executors.newFixedThreadPool(config.getAnalysisConcurrency());
     }
 
     /**
-     * Start analysis of all detected chains in priority order.
+     * Set the WorkflowDetector used for candidate discovery.
+     */
+    public void setWorkflowDetector(WorkflowDetector detector) {
+        this.workflowDetector = detector;
+    }
+
+    /**
+     * Set the ApplicationModel (shared across the pipeline).
+     */
+    public void setApplicationModel(ApplicationModel model) {
+        this.applicationModel = model != null ? model : new ApplicationModel();
+    }
+
+    /**
+     * Start analysis of all detected workflow candidates.
      */
     public void start() {
         if (running.get()) {
@@ -105,9 +118,15 @@ public class AnalysisEngine {
             return;
         }
 
+        if (workflowDetector == null) {
+            logger.log(LogCategory.ANALYSIS, LogLevel.ERROR, "AnalysisEngine",
+                    "Cannot start analysis: WorkflowDetector not set.");
+            return;
+        }
+
         running.set(true);
         paused.set(false);
-        completedChains.set(0);
+        completedCandidates.set(0);
 
         executor.submit(this::runAnalysisPipeline);
 
@@ -116,59 +135,55 @@ public class AnalysisEngine {
     }
 
     /**
-     * Analyze a specific chain (e.g., triggered from UI).
+     * Analyze a specific candidate (e.g., triggered from UI).
      */
-    public void analyzeChain(List<RequestNode> chain, boolean forceReanalyze) {
+    public void analyzeCandidate(WorkflowCandidate candidate, boolean forceReanalyze) {
         if (!llmClient.isConfigured()) {
             logger.log(LogCategory.ANALYSIS, LogLevel.ERROR, "AnalysisEngine",
                     "Cannot analyze: LLM client not configured.");
             return;
         }
 
-        String fingerprint = ChainVerdict.generateFingerprint(chain);
+        String fingerprint = ChainVerdict.generateFingerprint(candidate.getSteps());
         if (!forceReanalyze && verdictCache.containsKey(fingerprint)) {
             logger.log(LogCategory.ANALYSIS, LogLevel.INFO, "AnalysisEngine",
-                    "Chain already analyzed (cached). Use force to re-analyze.");
+                    "Candidate already analyzed (cached). Use force to re-analyze.");
             return;
         }
 
-        executor.submit(() -> analyzeChainInternal(chain));
+        executor.submit(() -> analyzeCandidateInternal(candidate, fingerprint));
     }
 
     /**
-     * Main analysis pipeline: discover chains, prioritize, analyze.
+     * Main analysis pipeline: discover workflow candidates, then analyze.
      */
     private void runAnalysisPipeline() {
         try {
-            // 1. Get all workflow chains from graph
-            List<List<RequestNode>> chains = graph.getWorkflowChains();
-            if (chains.isEmpty()) {
+            // 1. Detect workflow candidates
+            List<WorkflowCandidate> candidates = graph.detectWorkflowCandidates(workflowDetector);
+            if (candidates.isEmpty()) {
                 logger.log(LogCategory.ANALYSIS, LogLevel.INFO, "AnalysisEngine",
-                        "No workflow chains detected in graph.");
+                        "No workflow candidates detected.");
                 running.set(false);
                 return;
             }
 
-            // 2. Get edges for each chain (for prioritization)
-            List<List<RequestEdge>> chainEdges = new ArrayList<>();
-            for (List<RequestNode> chain : chains) {
-                List<RequestEdge> edges = new ArrayList<>();
-                for (RequestNode node : chain) {
-                    edges.addAll(graph.getEdgesForNode(node.getId()));
-                }
-                chainEdges.add(edges);
-            }
-
-            // 3. Prioritize chains
-            List<List<RequestNode>> prioritized = prioritizer.prioritize(chains, chainEdges);
-            totalChains.set(prioritized.size());
+            totalCandidates.set(candidates.size());
 
             logger.log(LogCategory.ANALYSIS, LogLevel.INFO, "AnalysisEngine",
-                    "Starting analysis of " + prioritized.size() + " chains (from "
-                            + chains.size() + " total, after filtering).");
+                    "Starting analysis of " + candidates.size() + " workflow candidates.");
 
-            // 4. Analyze each chain in priority order
-            for (int i = 0; i < prioritized.size(); i++) {
+            // 2. Build ApplicationModel from candidates
+            for (WorkflowCandidate candidate : candidates) {
+                for (RequestNode step : candidate.getSteps()) {
+                    if (step != null) {
+                        applicationModel.learnFromCandidate(List.of(step));
+                    }
+                }
+            }
+
+            // 3. Analyze each candidate
+            for (int i = 0; i < candidates.size(); i++) {
                 if (!running.get()) break;
 
                 // Pause support
@@ -179,25 +194,26 @@ public class AnalysisEngine {
                     }
                 }
 
-                List<RequestNode> chain = prioritized.get(i);
-                String fingerprint = ChainVerdict.generateFingerprint(chain);
+                WorkflowCandidate candidate = candidates.get(i);
+                String fingerprint = ChainVerdict.generateFingerprint(candidate.getSteps());
 
-                // Skip already-analyzed chains
+                // Skip already-analyzed
                 if (verdictCache.containsKey(fingerprint)) {
-                    completedChains.incrementAndGet();
+                    completedCandidates.incrementAndGet();
                     continue;
                 }
 
                 logger.log(LogCategory.ANALYSIS, LogLevel.INFO, "AnalysisEngine",
-                        "Analyzing chain " + (i + 1) + "/" + prioritized.size()
-                                + " (" + chain.size() + " nodes)");
+                        "Analyzing candidate " + (i + 1) + "/" + candidates.size()
+                                + " (" + candidate.getSteps().size() + " steps, score: "
+                                + String.format("%.1f", candidate.getWorkflowScore()) + ")");
 
-                analyzeChainInternal(chain);
-                completedChains.incrementAndGet();
+                analyzeCandidateInternal(candidate, fingerprint);
+                completedCandidates.incrementAndGet();
             }
 
             logger.log(LogCategory.ANALYSIS, LogLevel.INFO, "AnalysisEngine",
-                    "Analysis complete. Chains analyzed: " + completedChains.get()
+                    "Analysis complete. Candidates analyzed: " + completedCandidates.get()
                             + ", Findings: " + totalFindings.get()
                             + ", LLM calls: " + totalLLMCalls.get());
 
@@ -210,39 +226,83 @@ public class AnalysisEngine {
     }
 
     /**
-     * Analyze a single chain: pre-filter, then node-by-node LLM analysis.
+     * Analyze a single candidate using the 3-prompt structure:
+     * 1. Classify the workflow
+     * 2. Generate vulnerability hypotheses
+     * 3. Validate and produce final verdict
      */
-    private void analyzeChainInternal(List<RequestNode> chain) {
-        String chainId = UUID.randomUUID().toString().substring(0, 8);
-        String fingerprint = ChainVerdict.generateFingerprint(chain);
-        currentChainId = chainId;
+    private void analyzeCandidateInternal(WorkflowCandidate candidate, String fingerprint) {
+        String candidateId = UUID.randomUUID().toString().substring(0, 8);
+        currentCandidateId = candidateId;
 
         ChainVerdict verdict = new ChainVerdict();
-        verdict.setChainId(chainId);
+        verdict.setChainId(candidateId);
         verdict.setFingerprint(fingerprint);
-        verdict.setChain(chain);
+        // Convert WorkflowStep -> RequestNode for backward compat
+        List<RequestNode> nodes = new ArrayList<>();
+        for (RequestNode step : candidate.getSteps()) {
+            if (step != null) nodes.add(step);
+        }
+        verdict.setChain(nodes);
         verdict.setState(AnalysisState.ANALYZING);
         verdict.setStartTime(System.currentTimeMillis());
 
         try {
             // 1. Run heuristic pre-filters
-            List<HeuristicPreFilter.HeuristicSignal> signals = preFilter.analyze(chain);
+            List<HeuristicPreFilter.HeuristicSignal> signals = preFilter.analyze(nodes);
             verdict.setHeuristicSignals(signals);
             if (!signals.isEmpty()) {
                 logger.log(LogCategory.ANALYSIS, LogLevel.INFO, "AnalysisEngine",
-                        "Chain " + chainId + ": " + signals.size() + " heuristic signals found.");
-                for (HeuristicPreFilter.HeuristicSignal signal : signals) {
-                    logger.log(LogCategory.ANALYSIS, LogLevel.DEBUG, "AnalysisEngine",
-                            "  " + signal);
-                }
+                        "Candidate " + candidateId + ": " + signals.size()
+                                + " heuristic signals found.");
             }
 
-            // 2. Node-by-node LLM analysis with context accumulation
+            // 2. --- Prompt 1: Classify the workflow ---
+            String classifyPrompt = PromptBuilder.buildWorkflowClassifyPrompt(
+                    candidate, applicationModel);
+            totalLLMCalls.incrementAndGet();
+            String classifyResponse = llmClient.sendChatCompletion(
+                    SystemPrompt.PROMPT, classifyPrompt);
+
+            if (classifyResponse == null) {
+                logger.log(LogCategory.ANALYSIS, LogLevel.WARN, "AnalysisEngine",
+                        "LLM returned null for classify step, skipping candidate.");
+                verdict.setState(AnalysisState.FAILED);
+                verdict.setErrorMessage("LLM classify step returned null");
+                verdict.setEndTime(System.currentTimeMillis());
+                cacheAndNotify(fingerprint, verdict);
+                return;
+            }
+
+            // Extract candidate context from classify response
+            String workflowContext = LLMResponseParser.extractChainContext(classifyResponse);
+            String workflowType = LLMResponseParser.extractWorkflowType(classifyResponse);
+
+            // 3. --- Prompt 2: Generate vulnerability hypotheses ---
+            String hypothesesPrompt = PromptBuilder.buildHypothesesPrompt(
+                    candidate, workflowContext, workflowType, applicationModel);
+            totalLLMCalls.incrementAndGet();
+            String hypothesesResponse = llmClient.sendChatCompletion(
+                    SystemPrompt.PROMPT, hypothesesPrompt);
+
+            if (hypothesesResponse == null) {
+                logger.log(LogCategory.ANALYSIS, LogLevel.WARN, "AnalysisEngine",
+                        "LLM returned null for hypotheses step, skipping candidate.");
+                verdict.setState(AnalysisState.FAILED);
+                verdict.setErrorMessage("LLM hypotheses step returned null");
+                verdict.setEndTime(System.currentTimeMillis());
+                cacheAndNotify(fingerprint, verdict);
+                return;
+            }
+
+            List<String> hypotheses = LLMResponseParser.extractHypotheses(hypothesesResponse);
+
+            // 4. --- Prompt 3: Validate each hypothesis (per-step analysis) ---
             LLMContextManager contextManager = new LLMContextManager(config.getLlmMaxContextTokens());
             List<LLMAnalysisResult> nodeResults = new ArrayList<>();
-            currentChainNodes.set(chain.size());
+            currentCandidateSteps.set(nodes.size());
 
-            for (int i = 0; i < chain.size(); i++) {
+            for (int i = 0; i < nodes.size(); i++) {
                 if (!running.get()) {
                     verdict.setState(AnalysisState.CANCELLED);
                     break;
@@ -256,51 +316,51 @@ public class AnalysisEngine {
                     }
                 }
 
-                RequestNode node = chain.get(i);
-                currentNodeProgress.set(i + 1);
+                RequestNode node = nodes.get(i);
+                currentStepProgress.set(i + 1);
 
                 logger.log(LogCategory.ANALYSIS, LogLevel.INFO, "AnalysisEngine",
-                        "Chain " + chainId + ": analyzing node " + (i + 1) + "/" + chain.size()
-                                + " (Node#" + node.getNodeIndex() + " " + node.getMethod()
+                        "Candidate " + candidateId + ": analyzing step " + (i + 1)
+                                + "/" + nodes.size() + " (" + node.getMethod()
                                 + " " + node.getPath() + ")");
 
-                // Build prompt
+                // Build validation prompt for this step
                 List<RequestEdge> nodeEdges = graph.getEdgesForNode(node.getId());
-                String userMessage = PromptBuilder.buildPrompt(
-                        node, nodeEdges, contextManager, graph.getNodes());
+                String validatePrompt = PromptBuilder.buildValidationPrompt(
+                        node, nodeEdges, contextManager, graph.getNodes(),
+                        hypotheses, workflowContext, workflowType, applicationModel);
 
-                // Send to LLM
                 totalLLMCalls.incrementAndGet();
-                String rawResponse = llmClient.sendChatCompletion(
-                        SystemPrompt.PROMPT, userMessage);
+                String validateResponse = llmClient.sendChatCompletion(
+                        SystemPrompt.PROMPT, validatePrompt);
 
-                if (rawResponse == null) {
+                if (validateResponse == null) {
                     logger.log(LogCategory.ANALYSIS, LogLevel.WARN, "AnalysisEngine",
-                            "LLM returned null for Node#" + node.getNodeIndex() + ", skipping.");
+                            "LLM returned null for Node step, skipping.");
                     nodeResults.add(null);
                     continue;
                 }
 
                 // Track token usage
-                long tokens = LLMResponseParser.extractTokenUsage(rawResponse);
+                long tokens = LLMResponseParser.extractTokenUsage(validateResponse);
                 if (tokens > 0) llmClient.addTokensUsed(tokens);
 
                 // Parse response
-                LLMAnalysisResult result = LLMResponseParser.parse(rawResponse, logger);
+                LLMAnalysisResult result = LLMResponseParser.parse(validateResponse, logger);
                 nodeResults.add(result);
 
                 if (result != null) {
                     logger.log(LogCategory.ANALYSIS, LogLevel.INFO, "AnalysisEngine",
-                            "Node#" + node.getNodeIndex() + " verdict: " + result);
+                            "Step " + (i + 1) + " verdict: " + result.getVerdict());
 
-                    // Feed context back for next node
+                    // Feed context back for next step
                     NodeAnalysisContext ctx = NodeAnalysisContext.fromResult(
                             result, node.getNodeIndex(), node.getHost(), node.getPath());
                     contextManager.addAnalysisResult(ctx);
                 }
             }
 
-            // 3. Aggregate results
+            // 5. Aggregate results
             verdict.setNodeResults(nodeResults);
             verdict.aggregateResults();
             verdict.setEndTime(System.currentTimeMillis());
@@ -314,22 +374,64 @@ public class AnalysisEngine {
                 totalFindings.incrementAndGet();
             }
 
+            // Update ApplicationModel from this candidate
+            applicationModel.learnFromCandidate(nodes);
+
             logger.log(LogCategory.ANALYSIS, LogLevel.INFO, "AnalysisEngine",
-                    "Chain " + chainId + " complete: " + verdict);
+                    "Candidate " + candidateId + " complete: " + verdict);
 
         } catch (Exception e) {
             verdict.setState(AnalysisState.FAILED);
             verdict.setErrorMessage(e.getMessage());
             verdict.setEndTime(System.currentTimeMillis());
             logger.log(LogCategory.ERROR, LogLevel.ERROR, "AnalysisEngine",
-                    "Chain " + chainId + " analysis failed.", e);
+                    "Candidate " + candidateId + " analysis failed.", e);
         }
 
-        // Cache and store result
+        // Cache and notify
+        cacheAndNotify(fingerprint, verdict);
+    }
+
+    /**
+     * Legacy entry point: analyze a raw node chain (bridge for old callers).
+     * Wraps nodes into a WorkflowCandidate and delegates.
+     */
+    @Deprecated
+    public void analyzeChain(List<RequestNode> chain, boolean forceReanalyze) {
+        if (!llmClient.isConfigured()) return;
+        String fingerprint = ChainVerdict.generateFingerprint(chain);
+        if (!forceReanalyze && verdictCache.containsKey(fingerprint)) return;
+
+        // Build a WorkflowCandidate from the raw chain
+        // (score will be 0 since we don't have a detector, but analysis still works)
+        executor.submit(() -> {
+            WorkflowCandidate candidate = new WorkflowCandidate();
+            candidate.setWorkflowType(WorkflowType.UNKNOWN_BUSINESS_FLOW);
+            for (RequestNode node : chain) {
+                candidate.addStep(node);
+            }
+            analyzeCandidateInternal(candidate, fingerprint);
+        });
+    }
+
+    /**
+     * Re-analyze all cached verdicts.
+     */
+    public void reanalyzeAll() {
+        List<ChainVerdict> existing = new ArrayList<>(allVerdicts);
+        clearCache();
+        for (ChainVerdict v : existing) {
+            List<RequestNode> chain = v.getChain();
+            if (chain != null && !chain.isEmpty()) {
+                analyzeChain(chain, true);
+            }
+        }
+    }
+
+    private void cacheAndNotify(String fingerprint, ChainVerdict verdict) {
         verdictCache.put(fingerprint, verdict);
         allVerdicts.add(verdict);
 
-        // Notify listeners
         for (Consumer<ChainVerdict> listener : verdictListeners) {
             try { listener.accept(verdict); } catch (Exception ignored) {}
         }
@@ -395,9 +497,6 @@ public class AnalysisEngine {
         return verdictCache.get(fingerprint);
     }
 
-    /**
-     * Clear all cached verdicts (allows re-analysis).
-     */
     public void clearCache() {
         verdictCache.clear();
         allVerdicts.clear();
@@ -405,21 +504,23 @@ public class AnalysisEngine {
                 "Verdict cache cleared.");
     }
 
+    public ApplicationModel getApplicationModel() { return applicationModel; }
+
     // --- Progress ---
 
     public String getProgressText() {
         if (!running.get()) {
-            if (totalChains.get() == 0) return "Idle";
-            return "Complete: " + completedChains.get() + "/" + totalChains.get()
-                    + " chains, " + totalFindings.get() + " findings";
+            if (totalCandidates.get() == 0) return "Idle";
+            return "Complete: " + completedCandidates.get() + "/" + totalCandidates.get()
+                    + " candidates, " + totalFindings.get() + " findings";
         }
         if (paused.get()) return "Paused";
-        return "Analyzing chain " + completedChains.get() + "/" + totalChains.get()
-                + ", node " + currentNodeProgress.get() + "/" + currentChainNodes.get();
+        return "Analyzing candidate " + completedCandidates.get() + "/" + totalCandidates.get()
+                + ", step " + currentStepProgress.get() + "/" + currentCandidateSteps.get();
     }
 
-    public int getTotalChains() { return totalChains.get(); }
-    public int getCompletedChains() { return completedChains.get(); }
+    public int getTotalCandidates() { return totalCandidates.get(); }
+    public int getCompletedCandidates() { return completedCandidates.get(); }
     public long getTotalLLMCalls() { return totalLLMCalls.get(); }
     public long getTotalFindings() { return totalFindings.get(); }
 }

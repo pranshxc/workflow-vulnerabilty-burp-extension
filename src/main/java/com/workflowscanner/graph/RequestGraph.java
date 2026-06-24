@@ -1,5 +1,8 @@
 package com.workflowscanner.graph;
 
+import com.workflowscanner.workflow.WorkflowCandidate;
+import com.workflowscanner.workflow.WorkflowDetector;
+
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -19,6 +22,10 @@ import java.util.stream.Collectors;
  * The core request graph data structure.
  * Thread-safe for concurrent reads (UI, analysis) and writes (graph builder).
  * Supports chain detection, filtering, and statistics.
+ *
+ * <p><b>Workflow rework:</b> The old {@link #getWorkflowChains()} method (naive BFS)
+ * is deprecated in favor of {@link #detectWorkflowCandidates(WorkflowDetector)},
+ * which uses intent-aware workflow detection instead of connected components.</p>
  */
 public class RequestGraph {
 
@@ -95,21 +102,24 @@ public class RequestGraph {
         return result;
     }
 
-    // --- Chain Detection (Connected Components via BFS) ---
+    // --- Chain Detection ---
 
     /**
-     * Detect all workflow chains (connected subgraphs).
-     * Each chain is a list of nodes sorted by timestamp.
+     * Detect all connected components (subgraphs) via BFS.
+     * This is the low-level graph traversal method, replacing the older
+     * {@link #getWorkflowChains()} which made naive assumptions about workflow structure.
+     *
+     * Each component is a list of nodes sorted by timestamp.
      */
-    public List<List<RequestNode>> getWorkflowChains() {
+    public List<List<RequestNode>> getConnectedComponents() {
         Set<String> visited = new HashSet<>();
-        List<List<RequestNode>> chains = new ArrayList<>();
+        List<List<RequestNode>> components = new ArrayList<>();
 
         for (String nodeId : nodes.keySet()) {
             if (visited.contains(nodeId)) continue;
 
             // BFS to find connected component
-            List<RequestNode> chain = new ArrayList<>();
+            List<RequestNode> component = new ArrayList<>();
             Queue<String> queue = new LinkedList<>();
             queue.add(nodeId);
             visited.add(nodeId);
@@ -118,7 +128,7 @@ public class RequestGraph {
                 String current = queue.poll();
                 RequestNode node = nodes.get(current);
                 if (node != null) {
-                    chain.add(node);
+                    component.add(node);
                 }
 
                 // Follow outgoing edges
@@ -142,24 +152,55 @@ public class RequestGraph {
                 }
             }
 
-            // Sort chain by timestamp
-            chain.sort(Comparator.comparingLong(RequestNode::getTimestamp));
+            // Sort component by timestamp
+            component.sort(Comparator.comparingLong(RequestNode::getTimestamp));
 
-            if (chain.size() > 1) { // Only include chains with 2+ nodes
-                chains.add(chain);
+            if (component.size() > 1) { // Only include components with 2+ nodes
+                components.add(component);
             }
         }
 
-        // Sort chains by size (largest first)
-        chains.sort((a, b) -> Integer.compare(b.size(), a.size()));
-        return chains;
+        // Sort components by size (largest first)
+        components.sort((a, b) -> Integer.compare(b.size(), a.size()));
+        return components;
     }
 
     /**
-     * Get the full chain containing a specific node.
+     * Detect workflow candidates using intent-aware workflow detection.
+     * This is the replacement for {@link #getWorkflowChains()} and should be
+     * preferred for all new analysis code.
+     *
+     * @param detector the WorkflowDetector instance
+     * @return sorted list of workflow candidates (highest score first)
+     */
+    public List<WorkflowCandidate> detectWorkflowCandidates(WorkflowDetector detector) {
+        List<WorkflowCandidate> candidates = detector.detect(
+                new ArrayList<>(nodes.values()));
+        // Filter candidates with insufficient workflow relevance
+        candidates.removeIf(c -> c.getWorkflowScore() < 10);
+        // Sort by score descending
+        candidates.sort((a, b) -> Double.compare(b.getWorkflowScore(), a.getWorkflowScore()));
+        return candidates;
+    }
+
+    /**
+     * Legacy method: detect all connected subgraphs.
+     *
+     * @deprecated Replaced by {@link #getConnectedComponents()} for raw traversal
+     *             and {@link #detectWorkflowCandidates(WorkflowDetector)} for
+     *             workflow-aware analysis. This method creates naive connected-component
+     *             chains that do not respect workflow boundaries or intent.
+     */
+    @Deprecated
+    public List<List<RequestNode>> getWorkflowChains() {
+        return getConnectedComponents();
+    }
+
+    /**
+     * Get the full chain containing a specific node (using connected components).
      */
     public List<RequestNode> getChainForNode(String nodeId) {
-        for (List<RequestNode> chain : getWorkflowChains()) {
+        for (List<RequestNode> chain : getConnectedComponents()) {
             for (RequestNode node : chain) {
                 if (node.getId().equals(nodeId)) {
                     return chain;
@@ -204,7 +245,7 @@ public class RequestGraph {
     public int getEdgeCount() { return edges.size(); }
 
     public int getChainCount() {
-        return getWorkflowChains().size();
+        return getConnectedComponents().size();
     }
 
     public synchronized int getNextNodeIndex() {

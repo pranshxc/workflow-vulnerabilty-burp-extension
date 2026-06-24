@@ -1,6 +1,7 @@
 package com.workflowscanner.ui;
 
 import burp.api.montoya.MontoyaApi;
+import com.workflowscanner.HealthCheck;
 import com.workflowscanner.advisory.AdvisoryManager;
 import com.workflowscanner.analysis.AnalysisEngine;
 import com.workflowscanner.config.ExtensionConfig;
@@ -16,26 +17,40 @@ import java.awt.*;
 
 /**
  * Main tab panel registered in Burp Suite's UI.
- * Contains sub-tabs: Settings, Log, Graph.
+ * Contains sub-tabs: Settings, Log, Graph and a status bar at the bottom.
  */
 public class MainTabPanel {
 
+    private final JPanel mainPanel;
     private final JTabbedPane tabbedPane;
     private SettingsPanel settingsPanel;
+    private StatusBarPanel statusBar;
 
     public MainTabPanel(MontoyaApi api, ExtensionConfig config, ExtensionLogger logger,
                         RequestGraph graph, GraphBuilder graphBuilder, RequestPipeline pipeline,
                         LLMClient llmClient, AnalysisEngine analysisEngine,
                         AdvisoryManager advisoryManager) {
         this(api, config, logger, graph, graphBuilder, pipeline, llmClient,
-                analysisEngine, advisoryManager, null);
+                analysisEngine, advisoryManager, null, null);
     }
 
+    @SuppressWarnings("checkstyle:parameternumber")
     public MainTabPanel(MontoyaApi api, ExtensionConfig config, ExtensionLogger logger,
                         RequestGraph graph, GraphBuilder graphBuilder, RequestPipeline pipeline,
                         LLMClient llmClient, AnalysisEngine analysisEngine,
                         AdvisoryManager advisoryManager, BackfillService backfillService) {
+        this(api, config, logger, graph, graphBuilder, pipeline, llmClient,
+                analysisEngine, advisoryManager, backfillService, null);
+    }
 
+    @SuppressWarnings("checkstyle:parameternumber")
+    public MainTabPanel(MontoyaApi api, ExtensionConfig config, ExtensionLogger logger,
+                        RequestGraph graph, GraphBuilder graphBuilder, RequestPipeline pipeline,
+                        LLMClient llmClient, AnalysisEngine analysisEngine,
+                        AdvisoryManager advisoryManager, BackfillService backfillService,
+                        HealthCheck healthCheck) {
+
+        mainPanel = new JPanel(new BorderLayout());
         tabbedPane = new JTabbedPane();
 
         // Settings tab
@@ -57,13 +72,21 @@ public class MainTabPanel {
         // Graph tab
         GraphPanel graphExplorer = new GraphPanel(api, graph, analysisEngine, logger);
         tabbedPane.addTab("Graph", graphExplorer);
+
+        mainPanel.add(tabbedPane, BorderLayout.CENTER);
+
+        // Status bar at bottom
+        if (healthCheck != null) {
+            statusBar = new StatusBarPanel(healthCheck);
+            mainPanel.add(statusBar, BorderLayout.SOUTH);
+        }
     }
 
     /**
      * Get the Swing component to register with Burp's UI.
      */
     public Component getComponent() {
-        return tabbedPane;
+        return mainPanel;
     }
 
     /**
@@ -72,6 +95,9 @@ public class MainTabPanel {
     public void dispose() {
         if (settingsPanel != null) {
             settingsPanel.dispose();
+        }
+        if (statusBar != null) {
+            statusBar.stopUpdates();
         }
     }
 }

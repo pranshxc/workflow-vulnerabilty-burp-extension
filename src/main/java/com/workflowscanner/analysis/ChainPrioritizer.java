@@ -12,16 +12,15 @@ import java.util.Set;
 
 /**
  * Scores and prioritizes workflow chains for analysis.
- * Higher scores indicate chains more likely to contain vulnerabilities.
  *
- * Scoring heuristics:
- * - State-changing methods (POST, PUT, DELETE, PATCH) score higher
- * - Auth/financial endpoint keywords score higher
- * - Parameter reuse edges (data flowing between steps) score higher
- * - Longer chains = more attack surface
- * - Mixed methods (GET->POST->GET) score higher
- * - Purely static asset chains score lowest / skip
+ * @deprecated Replaced by WorkflowScorer in the workflow/ package.
+ *             The new approach uses intent-aware scoring within WorkflowDetector
+ *             rather than post-hoc chain prioritization. ChainPrioritizer's logic
+ *             (method diversity, keyword scoring, edge weighting) has been
+ *             migrated to WorkflowScorer with additional context from
+ *             RequestClassifier and ApplicationModel.
  */
+@Deprecated
 public class ChainPrioritizer {
 
     private static final Set<String> STATE_CHANGING_METHODS = Set.of("POST", "PUT", "DELETE", "PATCH");

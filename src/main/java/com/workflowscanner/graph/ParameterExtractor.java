@@ -1,5 +1,6 @@
 package com.workflowscanner.graph;
 
+import com.workflowscanner.classification.ValueKind;
 import com.workflowscanner.data.CapturedRequest;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
@@ -38,13 +39,23 @@ public class ParameterExtractor {
     /** Minimum value length to consider "interesting" (avoids false positives on "1", "true", etc.) */
     public static final int MIN_VALUE_LENGTH = 4;
 
-    private static final Pattern HIDDEN_FIELD_PATTERN =
-            Pattern.compile("<input[^>]+type=[\"']hidden[\"'][^>]*value=[\"']([^\"']+)[\"']",
+    /**
+     * Pattern to match individual <input> blocks, extracting type, name, and value
+     * from each block independently. Handles attribute reordering better than
+     * separate name/value regex passes.
+     */
+    private static final Pattern INPUT_BLOCK_PATTERN =
+            Pattern.compile("<input\\s[^>]*type=[\"']hidden[\"'][^>]*/?>",
                     Pattern.CASE_INSENSITIVE);
 
-    private static final Pattern HIDDEN_FIELD_NAME_PATTERN =
-            Pattern.compile("<input[^>]+type=[\"']hidden[\"'][^>]*name=[\"']([^\"']+)[\"']",
-                    Pattern.CASE_INSENSITIVE);
+    private static final Pattern INPUT_TYPE_PATTERN =
+            Pattern.compile("type=[\"']([^\"']+)[\"']", Pattern.CASE_INSENSITIVE);
+
+    private static final Pattern INPUT_NAME_PATTERN =
+            Pattern.compile("name=[\"']([^\"']+)[\"']", Pattern.CASE_INSENSITIVE);
+
+    private static final Pattern INPUT_VALUE_PATTERN =
+            Pattern.compile("value=[\"']([^\"']*)[\"']", Pattern.CASE_INSENSITIVE);
 
     /**
      * Extract all parameters from a request.
@@ -157,11 +168,13 @@ public class ParameterExtractor {
     }
 
     /**
-     * Get all "interesting" values from a map (values meeting minimum length).
+     * Get all "interesting" values from a map (values meeting minimum length and kind criteria).
+     * Uses ValueKind classification to filter out session cookies, booleans, enums, etc.
      */
     public static Set<String> getInterestingValues(Map<String, Object> params) {
         Set<String> values = new HashSet<>();
-        for (Object value : params.values()) {
+        for (Map.Entry<String, Object> entry : params.entrySet()) {
+            Object value = entry.getValue();
             if (value != null) {
                 String strValue = value.toString();
                 if (strValue.length() >= MIN_VALUE_LENGTH && !isCommonValue(strValue)) {
@@ -170,6 +183,18 @@ public class ParameterExtractor {
             }
         }
         return values;
+    }
+
+    /**
+     * Check if a specific (name, value) pair should create a graph correlation edge.
+     * Uses ValueKind classification to filter — only business IDs, security tokens,
+     * money amounts, and emails produce edges. Session cookies, booleans, enums,
+     * and static config values do not.
+     */
+    public static boolean isInterestingCorrelationValue(String name, String value) {
+        if (name == null || value == null || value.length() < MIN_VALUE_LENGTH) return false;
+        ValueKind kind = ValueKind.classify(name, value);
+        return kind.isCorrelationRelevant();
     }
 
     // --- Internal Parsing Methods ---
@@ -227,15 +252,32 @@ public class ParameterExtractor {
         }
     }
 
+    /**
+     * Extract hidden form fields from HTML using per-input-block regex.
+     * Handles attribute reordering better than separate name/value passes.
+     * Each <input> block is matched independently, then name and value are
+     * extracted from within that block.
+     */
     private static Map<String, Object> extractHiddenFields(String html) {
         Map<String, Object> fields = new HashMap<>();
-        Matcher valueMatcher = HIDDEN_FIELD_PATTERN.matcher(html);
-        Matcher nameMatcher = HIDDEN_FIELD_NAME_PATTERN.matcher(html);
+        Matcher blockMatcher = INPUT_BLOCK_PATTERN.matcher(html);
 
-        while (valueMatcher.find() && nameMatcher.find()) {
-            String name = nameMatcher.group(1);
-            String value = valueMatcher.group(1);
-            if (value.length() >= MIN_VALUE_LENGTH) {
+        while (blockMatcher.find()) {
+            String inputBlock = blockMatcher.group();
+
+            // Confirm type="hidden" (double-check)
+            Matcher typeMatcher = INPUT_TYPE_PATTERN.matcher(inputBlock);
+            if (!typeMatcher.find() || !"hidden".equalsIgnoreCase(typeMatcher.group(1))) continue;
+
+            // Extract name
+            Matcher nameMatcher = INPUT_NAME_PATTERN.matcher(inputBlock);
+            String name = nameMatcher.find() ? nameMatcher.group(1) : null;
+
+            // Extract value
+            Matcher valueMatcher = INPUT_VALUE_PATTERN.matcher(inputBlock);
+            String value = valueMatcher.find() ? valueMatcher.group(1) : null;
+
+            if (name != null && value != null && value.length() >= MIN_VALUE_LENGTH) {
                 fields.put("hidden." + name, value);
             }
         }

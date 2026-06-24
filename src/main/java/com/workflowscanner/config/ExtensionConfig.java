@@ -41,6 +41,12 @@ public class ExtensionConfig {
     private boolean autoAnalyzeNewChains = false;
     private String validationProfile = "standard"; // conservative, standard, aggressive
 
+    // --- Workflow Detection (added in workflow rework) ---
+    private double workflowScoreThreshold = 20.0;    // Score >= 20 → LLM analysis
+    private double workflowCandidateThreshold = 10.0; // Score 10–19 → display only
+    private int workflowMinSteps = 3;                 // Minimum steps for a valid workflow
+    private int workflowSessionWindowMs = 120000;     // 2-minute session window
+
     // --- Logging ---
     private int logRingBufferSize = 10000;
     private boolean fileLoggingEnabled = false;
@@ -176,6 +182,20 @@ public class ExtensionConfig {
 
     public String getValidationProfile() { return validationProfile; }
     public void setValidationProfile(String validationProfile) { this.validationProfile = validationProfile; }
+
+    // --- Workflow Detection ---
+
+    public double getWorkflowScoreThreshold() { return workflowScoreThreshold; }
+    public void setWorkflowScoreThreshold(double t) { this.workflowScoreThreshold = t; }
+
+    public double getWorkflowCandidateThreshold() { return workflowCandidateThreshold; }
+    public void setWorkflowCandidateThreshold(double t) { this.workflowCandidateThreshold = t; }
+
+    public int getWorkflowMinSteps() { return workflowMinSteps; }
+    public void setWorkflowMinSteps(int s) { this.workflowMinSteps = s; }
+
+    public int getWorkflowSessionWindowMs() { return workflowSessionWindowMs; }
+    public void setWorkflowSessionWindowMs(int ms) { this.workflowSessionWindowMs = ms; }
 
     public int getLogRingBufferSize() { return logRingBufferSize; }
     public void setLogRingBufferSize(int logRingBufferSize) { this.logRingBufferSize = logRingBufferSize; }

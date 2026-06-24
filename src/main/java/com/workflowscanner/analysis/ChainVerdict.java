@@ -119,14 +119,14 @@ public class ChainVerdict {
 
     /**
      * Generate a fingerprint for deduplication.
-     * Based on sorted (method+path) pairs in the chain.
+     * Uses (method+path) pairs in their natural chain order with -> separator.
+     * Does NOT sort — ordering matters for workflow identity.
      */
     public static String generateFingerprint(List<RequestNode> chain) {
         if (chain == null || chain.isEmpty()) return "";
         return chain.stream()
                 .map(n -> (n.getMethod() != null ? n.getMethod() : "") + ":" + (n.getPath() != null ? n.getPath() : ""))
-                .sorted()
-                .collect(Collectors.joining("|"));
+                .collect(Collectors.joining(" -> "));
     }
 
     // --- Getters and Setters ---

@@ -18,7 +18,8 @@ import java.util.function.Consumer;
  * - REQUEST_CAPTURED: new request entered the pipeline
  * - GRAPH_UPDATED: node or edge added to graph
  * - CHAIN_DETECTED: new workflow chain detected
- * - ANALYSIS_COMPLETE: chain analysis finished (carries ChainVerdict)
+ * - WORKFLOW_CANDIDATE_DETECTED: workflow candidate discovered (carries WorkflowCandidate list)
+ * - ANALYSIS_COMPLETE: candidate analysis finished (carries ChainVerdict)
  * - VALIDATION_COMPLETE: validation finished (carries ValidationResult list)
  * - ISSUE_CREATED: Burp advisory created
  * - CONFIG_CHANGED: configuration was modified
@@ -29,6 +30,7 @@ public class EventBus {
         REQUEST_CAPTURED,
         GRAPH_UPDATED,
         CHAIN_DETECTED,
+        WORKFLOW_CANDIDATE_DETECTED,
         ANALYSIS_COMPLETE,
         VALIDATION_COMPLETE,
         ISSUE_CREATED,

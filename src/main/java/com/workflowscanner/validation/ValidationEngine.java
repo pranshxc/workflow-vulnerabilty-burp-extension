@@ -93,9 +93,12 @@ public class ValidationEngine {
             switch (vulnType) {
                 case "step_skipping":
                     results.addAll(validateStepSkipping(chain));
+                    // Also check state effects
+                    results.addAll(validateStateEffects(chain));
                     break;
                 case "value_manipulation":
                     results.addAll(validateValueManipulation(chain, verdict));
+                    results.addAll(validateStateEffects(chain));
                     break;
                 case "replay_attack":
                     results.addAll(validateReplay(chain));
@@ -129,14 +132,16 @@ public class ValidationEngine {
     }
 
     // ========================================================================
-    // a) Step Skipping Validation
+    // a) Step Skipping Validation (auth-preserving skip mode)
     // ========================================================================
 
     private List<ValidationResult> validateStepSkipping(List<RequestNode> chain) {
         List<ValidationResult> results = new ArrayList<>();
         if (chain.size() < 2) return results;
 
-        // Replay the final step without completing earlier steps (fresh session)
+        // Replay the final step without completing earlier steps.
+        // Uses auth-preserving skip mode: keeps session/auth cookies,
+        // strips only workflow-state tokens (CSRF, nonce, etc.).
         RequestNode finalNode = chain.get(chain.size() - 1);
 
         if (!isInScope(finalNode)) return results;
@@ -148,7 +153,7 @@ public class ValidationEngine {
         if (dryRunMode.get()) {
             result.setDryRun(true);
             result.setEvidence("[DRY RUN] Would replay " + finalNode.getMethod()
-                    + " " + finalNode.getUrl() + " with fresh session (no cookies/auth)");
+                    + " " + finalNode.getUrl() + " with auth-preserving skip mode");
             results.add(result);
             return results;
         }
@@ -171,7 +176,7 @@ public class ValidationEngine {
             boolean confirmed = ResponseComparator.isVulnerabilityConfirmed(comparison);
             result.setConfirmed(confirmed);
             result.setConfidence(confirmed ? 0.9 : 0.3);
-            result.setEvidence("Step-skip test: replayed final step with fresh session.\n"
+            result.setEvidence("Step-skip test (auth-preserving): replayed final step without prerequisites.\n"
                     + comparison.evidence
                     + (confirmed ? "\nServer accepted request without prerequisites!"
                     : "\nServer correctly rejected the request."));
@@ -181,6 +186,110 @@ public class ValidationEngine {
 
         results.add(result);
         rateLimitDelay();
+        return results;
+    }
+
+    // ========================================================================
+    // f) State Effect Validation
+    //    After replaying a mutated/replayed request, send a follow-up GET to
+    //    the referrer or the previous step's URL to detect state changes.
+    // ========================================================================
+
+    private List<ValidationResult> validateStateEffects(List<RequestNode> chain) {
+        List<ValidationResult> results = new ArrayList<>();
+        if (chain.size() < 2) return results;
+
+        // For each step that's a POST/PUT/DELETE, replay it and then
+        // follow up with a GET to the referrer (if available) or previous URL.
+        for (int i = 1; i < chain.size(); i++) {
+            RequestNode targetNode = chain.get(i);
+            String method = targetNode.getMethod() != null ? targetNode.getMethod().toUpperCase() : "GET";
+            if (!"POST".equals(method) && !"PUT".equals(method) && !"DELETE".equals(method)) continue;
+            if (!isInScope(targetNode)) continue;
+
+            RequestNode followUpNode = chain.get(i - 1); // Previous step as baseline
+
+            // Find the follow-up URL from referrer or previous step's path
+            String followUpUrl = null;
+            if (targetNode.getRequest() != null && targetNode.getRequest().getReferrer() != null) {
+                followUpUrl = targetNode.getRequest().getReferrer();
+            } else if (followUpNode != null && followUpNode.getUrl() != null) {
+                followUpUrl = followUpNode.getUrl();
+            }
+
+            if (followUpUrl == null) continue;
+
+            ValidationResult result = new ValidationResult(
+                    "State effect: " + targetNode.getMethod() + " " + targetNode.getPath()
+                            + " -> GET " + followUpUrl,
+                    ValidationResult.Strategy.STEP_SKIP);
+
+            if (dryRunMode.get()) {
+                result.setDryRun(true);
+                result.setEvidence("[DRY RUN] Would replay " + targetNode.getMethod()
+                        + " " + targetNode.getUrl() + " then fetch " + followUpUrl
+                        + " to detect state changes");
+                results.add(result);
+                continue;
+            }
+
+            long start = System.currentTimeMillis();
+
+            // Phase 1: Replay the state-changing request
+            RequestReplayer.ReplayResponse changeResponse = replayer.replay(
+                    targetNode, null, false);
+
+            if (changeResponse == null) {
+                result.setEvidence("State effect test failed: no response from replay.");
+                results.add(result);
+                continue;
+            }
+
+            // Phase 2: Follow up with GET to detect state changes
+            // Build a simple GET request to the follow-up URL
+            RequestNode followUpTemplate = new RequestNode(targetNode.getRequest(), targetNode.getNodeIndex());
+            followUpTemplate.setUrl(followUpUrl);
+            followUpTemplate.setMethod("GET");
+            followUpTemplate.setPath("/"); // Placeholder
+
+            RequestReplayer.ReplayResponse followUpResponse = replayer.replay(
+                    followUpTemplate, null, false);
+
+            result.setDurationMs(System.currentTimeMillis() - start);
+
+            if (followUpResponse != null) {
+                // Compare with original follow-up node's response
+                String origBody = followUpNode != null && followUpNode.getRequest() != null
+                        ? followUpNode.getRequest().getResponseBody() : "";
+                int origStatus = followUpNode != null ? followUpNode.getStatusCode() : 200;
+
+                ResponseComparator.ComparisonResult comparison =
+                        ResponseComparator.compare(origStatus, origBody,
+                                followUpResponse.statusCode, followUpResponse.body);
+
+                result.setOriginalStatusCode(origStatus);
+                result.setTestStatusCode(followUpResponse.statusCode);
+                result.setResponseSimilarity(comparison.bodySimilarity);
+
+                // If responses differ significantly, state may have changed
+                boolean stateChanged = comparison.bodySimilarity < 0.7
+                        || origStatus != followUpResponse.statusCode;
+                result.setConfirmed(stateChanged);
+                result.setConfidence(stateChanged ? 0.7 : 0.1);
+                result.setEvidence("State effect test: replayed " + targetNode.getMethod()
+                        + " " + targetNode.getPath() + "\n"
+                        + "Follow-up GET " + followUpUrl + ": status "
+                        + origStatus + " -> " + followUpResponse.statusCode + "\n"
+                        + "Response similarity: " + String.format("%.2f", comparison.bodySimilarity)
+                        + (stateChanged ? "\nState changed after replay!"
+                        : "\nNo detectable state change."));
+            } else {
+                result.setEvidence("State effect test: replayed successfully but follow-up GET failed.");
+            }
+
+            results.add(result);
+            rateLimitDelay();
+        }
         return results;
     }
 

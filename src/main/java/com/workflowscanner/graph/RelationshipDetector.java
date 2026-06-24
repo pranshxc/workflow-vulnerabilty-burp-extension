@@ -1,5 +1,9 @@
 package com.workflowscanner.graph;
 
+import com.workflowscanner.classification.EdgeStrength;
+import com.workflowscanner.classification.RequestClassification;
+import com.workflowscanner.classification.RequestIntent;
+import com.workflowscanner.classification.ValueKind;
 import com.workflowscanner.data.CapturedRequest;
 import com.workflowscanner.data.RequestConverter;
 import com.workflowscanner.logging.ExtensionLogger;
@@ -13,29 +17,34 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Detects relationships between request nodes using five heuristics:
- * 1. Redirect chains (3xx Location header)
- * 2. Referrer header analysis
- * 3. Time window correlation
- * 4. Parameter reuse detection (via inverted index)
- * 5. Response-to-request correlation (Set-Cookie, JSON values)
+ * Detects relationships between request nodes using five heuristics.
  *
- * Uses an inverted value index for O(1) parameter reuse lookups.
- * Edge computation is incremental: only new nodes are checked against existing nodes.
+ * Edge strength tiers (used downstream by WorkflowDetector):
+ * - STRONG: redirect, user-defined, business-token value flow
+ * - MEDIUM: referrer to business endpoint, object-ID reuse
+ * - WEAK: same-host time proximity, referrer to static/telemetry
+ * - CONTEXT_ONLY: session cookie propagation, telemetry dependency
+ *
+ * Key changes from the original design:
+ * - TIME_WINDOW no longer creates graph edges (context-only)
+ * - REFERRER confidence varies by target intent
+ * - RESPONSE_CORRELATION filters out session cookies
+ * - PARAM_REUSE uses ValueKind classification to filter noise
  */
 public class RelationshipDetector {
-
-    /** Default time window for temporal correlation (milliseconds). */
-    private static final long DEFAULT_TIME_WINDOW_MS = 5000;
 
     private final RequestGraph graph;
     private final ExtensionLogger logger;
 
-    /**
-     * Inverted index: value -> set of node IDs whose RESPONSE contains that value.
-     * Used for fast parameter reuse detection.
-     */
+    // Inverted index: value -> set of node IDs whose RESPONSE contains that value
     private final Map<String, Set<String>> responseValueIndex = new ConcurrentHashMap<>();
+
+    // Session cookie names that should never create workflow edges
+    private static final Set<String> SESSION_COOKIE_NAMES = Set.of(
+            "jsessionid", "phpsessid", "connect.sid", "session", "_auth",
+            "access_token", "refresh_token", "sid", "token", "auth_",
+            "awsalb", "lb", "sessionid", "__cfduid", "cfid", "cftoken",
+            "rememberme", "remember_me", "xsrf-token", "x-csrf-token");
 
     public RelationshipDetector(RequestGraph graph, ExtensionLogger logger) {
         this.graph = graph;
@@ -44,16 +53,13 @@ public class RelationshipDetector {
 
     /**
      * Compute all edges for a newly added node against existing nodes.
-     * This is the main entry point called by GraphBuilder for each new node.
-     * Returns the list of new edges created.
      */
     public List<RequestEdge> detectRelationships(RequestNode newNode) {
         List<RequestEdge> newEdges = new ArrayList<>();
 
-        // Run all five heuristics
         newEdges.addAll(detectRedirectChains(newNode));
         newEdges.addAll(detectReferrerLinks(newNode));
-        newEdges.addAll(detectTimeWindowCorrelation(newNode));
+        // TIME_WINDOW is intentionally omitted — context-only, no edges created
         newEdges.addAll(detectParameterReuse(newNode));
         newEdges.addAll(detectResponseCorrelation(newNode));
         newEdges.addAll(detectUserDefinedGroups(newNode));
@@ -64,6 +70,54 @@ public class RelationshipDetector {
         return newEdges;
     }
 
+    /**
+     * Get the edge strength for a given edge and its nodes.
+     * Used by WorkflowDetector to decide which edges form workflow chains.
+     */
+    public EdgeStrength getEdgeStrength(RequestEdge edge, RequestNode source, RequestNode target) {
+        switch (edge.getType()) {
+            case REDIRECT:
+                return EdgeStrength.STRONG;
+            case USER_DEFINED:
+                return EdgeStrength.STRONG;
+            case PARAM_REUSE:
+                // Business ID and security token reuse = STRONG
+                if (isBusinessValueFlow(edge)) return EdgeStrength.STRONG;
+                return EdgeStrength.MEDIUM;
+            case REFERRER:
+                // Referrer to business endpoint = MEDIUM, to static/telemetry = WEAK
+                if (target != null && isBusinessRelevant(target)) return EdgeStrength.MEDIUM;
+                return EdgeStrength.WEAK;
+            case RESPONSE_CORRELATION:
+                // Business token correlation = MEDIUM, cookie correlation = CONTEXT_ONLY
+                if (edge.getEvidence() != null && edge.getEvidence().contains("Set-Cookie")) {
+                    return EdgeStrength.CONTEXT_ONLY;
+                }
+                return EdgeStrength.MEDIUM;
+            case TIME_WINDOW:
+                return EdgeStrength.WEAK;
+            default:
+                return EdgeStrength.WEAK;
+        }
+    }
+
+    private boolean isBusinessValueFlow(RequestEdge edge) {
+        // PARAM_REUSE edges containing business IDs or tokens are strong
+        // This is a heuristic based on evidence text — could be improved
+        return edge.getConfidence() >= 0.8;
+    }
+
+    private boolean isBusinessRelevant(RequestNode node) {
+        RequestClassification cls = node.getClassification();
+        if (cls == null) return true; // Conservative: assume relevant
+        RequestIntent intent = cls.getIntent();
+        return intent == RequestIntent.BUSINESS_ACTION
+                || intent == RequestIntent.BUSINESS_READ
+                || intent == RequestIntent.AUTHENTICATION
+                || intent == RequestIntent.WORKFLOW_STATE
+                || intent == RequestIntent.UNKNOWN;
+    }
+
     // ========================================================================
     // 1. Redirect Chain Detection
     // ========================================================================
@@ -71,33 +125,28 @@ public class RelationshipDetector {
     private List<RequestEdge> detectRedirectChains(RequestNode newNode) {
         List<RequestEdge> edges = new ArrayList<>();
 
-        // Check if any existing node's redirect Location matches this node's URL
         for (RequestNode existing : graph.getNodes().values()) {
             if (existing.getId().equals(newNode.getId())) continue;
 
-            // Existing node redirects TO new node?
             if (existing.isRedirect()) {
                 String location = existing.getRedirectLocation();
                 if (location != null && urlMatches(location, newNode.getUrl())) {
-                    RequestEdge edge = new RequestEdge(
+                    edges.add(new RequestEdge(
                             existing.getId(), newNode.getId(),
                             EdgeType.REDIRECT, 1.0,
                             existing.getStatusCode() + " Location: " + location
-                                    + " -> " + newNode.getMethod() + " " + newNode.getUrl());
-                    edges.add(edge);
+                                    + " -> " + newNode.getMethod() + " " + newNode.getUrl()));
                 }
             }
 
-            // New node redirects TO existing node?
             if (newNode.isRedirect()) {
                 String location = newNode.getRedirectLocation();
                 if (location != null && urlMatches(location, existing.getUrl())) {
-                    RequestEdge edge = new RequestEdge(
+                    edges.add(new RequestEdge(
                             newNode.getId(), existing.getId(),
                             EdgeType.REDIRECT, 1.0,
                             newNode.getStatusCode() + " Location: " + location
-                                    + " -> " + existing.getMethod() + " " + existing.getUrl());
-                    edges.add(edge);
+                                    + " -> " + existing.getMethod() + " " + existing.getUrl()));
                 }
             }
         }
@@ -105,7 +154,7 @@ public class RelationshipDetector {
     }
 
     // ========================================================================
-    // 2. Referrer Header Analysis
+    // 2. Referrer Header Analysis (tiered confidence based on target intent)
     // ========================================================================
 
     private List<RequestEdge> detectReferrerLinks(RequestNode newNode) {
@@ -115,22 +164,20 @@ public class RelationshipDetector {
 
         String referrer = newReq.getReferrer();
 
-        // New node has a Referer pointing to an existing node?
         if (referrer != null && !referrer.isEmpty()) {
             for (RequestNode existing : graph.getNodes().values()) {
                 if (existing.getId().equals(newNode.getId())) continue;
                 if (urlMatches(referrer, existing.getUrl())) {
-                    RequestEdge edge = new RequestEdge(
+                    double confidence = isBusinessRelevant(newNode) ? 0.85 : 0.5;
+                    edges.add(new RequestEdge(
                             existing.getId(), newNode.getId(),
-                            EdgeType.REFERRER, 0.9,
-                            "Referer header: " + referrer + " matches " + existing.getUrl());
-                    edges.add(edge);
-                    break; // One referrer match is enough
+                            EdgeType.REFERRER, confidence,
+                            "Referer header: " + referrer + " matches " + existing.getUrl()));
+                    break;
                 }
             }
         }
 
-        // Any existing node has a Referer pointing to the new node?
         for (RequestNode existing : graph.getNodes().values()) {
             if (existing.getId().equals(newNode.getId())) continue;
             CapturedRequest existingReq = existing.getRequest();
@@ -138,156 +185,109 @@ public class RelationshipDetector {
 
             String existingReferrer = existingReq.getReferrer();
             if (existingReferrer != null && urlMatches(existingReferrer, newNode.getUrl())) {
-                RequestEdge edge = new RequestEdge(
+                double confidence = isBusinessRelevant(existing) ? 0.85 : 0.5;
+                edges.add(new RequestEdge(
                         newNode.getId(), existing.getId(),
-                        EdgeType.REFERRER, 0.9,
-                        "Referer header: " + existingReferrer + " matches " + newNode.getUrl());
-                edges.add(edge);
-            }
-        }
-
-        return edges;
-    }
-
-    // ========================================================================
-    // 3. Time Window Correlation
-    // ========================================================================
-
-    private List<RequestEdge> detectTimeWindowCorrelation(RequestNode newNode) {
-        List<RequestEdge> edges = new ArrayList<>();
-
-        for (RequestNode existing : graph.getNodes().values()) {
-            if (existing.getId().equals(newNode.getId())) continue;
-
-            // Same host only
-            if (!sameHost(newNode, existing)) continue;
-
-            long timeDiff = Math.abs(newNode.getTimestamp() - existing.getTimestamp());
-            if (timeDiff > 0 && timeDiff <= DEFAULT_TIME_WINDOW_MS) {
-                // Don't create time window edges if a stronger relationship already exists
-                if (hasStrongerEdge(newNode.getId(), existing.getId())) continue;
-
-                // Confidence scales with proximity (closer = higher)
-                double confidence = 0.3 + (0.2 * (1.0 - (double) timeDiff / DEFAULT_TIME_WINDOW_MS));
-
-                // Determine direction by timestamp
-                String sourceId = existing.getTimestamp() < newNode.getTimestamp()
-                        ? existing.getId() : newNode.getId();
-                String targetId = sourceId.equals(existing.getId())
-                        ? newNode.getId() : existing.getId();
-
-                RequestEdge edge = new RequestEdge(
-                        sourceId, targetId,
-                        EdgeType.TIME_WINDOW, confidence,
-                        "Same host, " + timeDiff + "ms apart");
-                edges.add(edge);
+                        EdgeType.REFERRER, confidence,
+                        "Referer header: " + existingReferrer + " matches " + newNode.getUrl()));
             }
         }
         return edges;
     }
 
     // ========================================================================
-    // 4. Parameter Reuse Detection (via Inverted Index)
+    // 3. Parameter Reuse Detection (filtered by ValueKind)
     // ========================================================================
 
     private List<RequestEdge> detectParameterReuse(RequestNode newNode) {
         List<RequestEdge> edges = new ArrayList<>();
+        Map<String, Object> newParams = newNode.getExtractedParams();
+        if (newParams == null) return edges;
 
-        // Get all parameter values from the new node's REQUEST
-        Set<String> requestValues = ParameterExtractor.getInterestingValues(
-                newNode.getExtractedParams());
+        for (Map.Entry<String, Object> entry : newParams.entrySet()) {
+            String paramName = entry.getKey();
+            String paramValue = entry.getValue() != null ? entry.getValue().toString() : null;
+            if (paramValue == null || paramValue.length() < 4) continue;
 
-        // Check if any of these values exist in a previous node's RESPONSE
-        for (String value : requestValues) {
-            Set<String> sourceNodeIds = responseValueIndex.get(value);
+            // Filter through ValueKind — only correlation-relevant values create edges
+            if (!ParameterExtractor.isInterestingCorrelationValue(paramName, paramValue)) continue;
+
+            Set<String> sourceNodeIds = responseValueIndex.get(paramValue);
             if (sourceNodeIds == null) continue;
 
             for (String sourceNodeId : sourceNodeIds) {
                 if (sourceNodeId.equals(newNode.getId())) continue;
-
                 RequestNode sourceNode = graph.getNode(sourceNodeId);
-                if (sourceNode == null) continue;
+                if (sourceNode == null || sourceNode.getTimestamp() >= newNode.getTimestamp()) continue;
 
-                // Only link if source is older than target
-                if (sourceNode.getTimestamp() >= newNode.getTimestamp()) continue;
-
-                // Find which param name contains this value
-                String paramName = findParamName(newNode.getExtractedParams(), value);
-                String responseName = findParamName(sourceNode.getResponseData(), value);
-
-                RequestEdge edge = new RequestEdge(
+                String responseName = findParamName(sourceNode.getResponseData(), paramValue);
+                edges.add(new RequestEdge(
                         sourceNodeId, newNode.getId(),
                         EdgeType.PARAM_REUSE, 0.8,
-                        "Value '" + truncate(value, 40) + "' from response "
+                        "Value '" + truncate(paramValue, 40) + "' from response "
                                 + (responseName != null ? "(" + responseName + ")" : "")
                                 + " of Node#" + sourceNode.getNodeIndex()
-                                + " reused in request "
-                                + (paramName != null ? "(" + paramName + ")" : "")
-                                + " of Node#" + newNode.getNodeIndex());
-                edges.add(edge);
+                                + " reused in request (" + paramName + ")"
+                                + " of Node#" + newNode.getNodeIndex()));
             }
         }
-
         return edges;
     }
 
     // ========================================================================
-    // 5. Response-to-Request Correlation
+    // 4. Response-to-Request Correlation (session cookies excluded)
     // ========================================================================
 
     private List<RequestEdge> detectResponseCorrelation(RequestNode newNode) {
         List<RequestEdge> edges = new ArrayList<>();
-
-        // Check Set-Cookie -> Cookie chains
         Map<String, Object> newParams = newNode.getExtractedParams();
+        if (newParams == null) return edges;
+
         for (Map.Entry<String, Object> entry : newParams.entrySet()) {
             if (!entry.getKey().startsWith("cookie.")) continue;
-            String cookieName = entry.getKey().substring(7);
+            String cookieName = entry.getKey().substring(7).toLowerCase();
+
+            // Skip session cookies — they don't indicate workflow relationships
+            if (SESSION_COOKIE_NAMES.contains(cookieName)) continue;
+
             String cookieValue = entry.getValue().toString();
 
-            // Look for a Set-Cookie with the same name in previous responses
             for (RequestNode existing : graph.getNodes().values()) {
                 if (existing.getId().equals(newNode.getId())) continue;
                 if (existing.getTimestamp() >= newNode.getTimestamp()) continue;
 
                 Object setCookieValue = existing.getResponseData().get("set-cookie." + cookieName);
                 if (setCookieValue != null && setCookieValue.toString().equals(cookieValue)) {
-                    RequestEdge edge = new RequestEdge(
+                    edges.add(new RequestEdge(
                             existing.getId(), newNode.getId(),
                             EdgeType.RESPONSE_CORRELATION, 0.85,
                             "Set-Cookie '" + cookieName + "' from Node#" + existing.getNodeIndex()
-                                    + " used as Cookie in Node#" + newNode.getNodeIndex());
-                    edges.add(edge);
+                                    + " used as Cookie in Node#" + newNode.getNodeIndex()));
                 }
             }
         }
-
         return edges;
     }
 
     // ========================================================================
-    // 6. User-Defined Groups (Context Menu)
+    // 5. User-Defined Groups (Context Menu)
     // ========================================================================
 
     private List<RequestEdge> detectUserDefinedGroups(RequestNode newNode) {
         List<RequestEdge> edges = new ArrayList<>();
         if (newNode.getGroupId() == null) return edges;
 
-        // Link to other nodes in the same group
         for (RequestNode existing : graph.getNodes().values()) {
             if (existing.getId().equals(newNode.getId())) continue;
             if (newNode.getGroupId().equals(existing.getGroupId())) {
-                // Direction by timestamp
                 String sourceId = existing.getTimestamp() < newNode.getTimestamp()
                         ? existing.getId() : newNode.getId();
                 String targetId = sourceId.equals(existing.getId())
                         ? newNode.getId() : existing.getId();
-
-                RequestEdge edge = new RequestEdge(
+                edges.add(new RequestEdge(
                         sourceId, targetId,
                         EdgeType.USER_DEFINED, 1.0,
-                        "User-grouped via context menu (group: " + newNode.getGroupId() + ")");
-                edges.add(edge);
+                        "User-grouped via context menu (group: " + newNode.getGroupId() + ")"));
             }
         }
         return edges;
@@ -297,9 +297,6 @@ public class RelationshipDetector {
     // Inverted Index Management
     // ========================================================================
 
-    /**
-     * Index all interesting values from a node's response data.
-     */
     private void indexResponseValues(RequestNode node) {
         Set<String> values = ParameterExtractor.getInterestingValues(node.getResponseData());
         for (String value : values) {
@@ -308,9 +305,6 @@ public class RelationshipDetector {
         }
     }
 
-    /**
-     * Rebuild the entire inverted index (e.g., after loading from disk).
-     */
     public void rebuildIndex() {
         responseValueIndex.clear();
         for (RequestNode node : graph.getNodes().values()) {
@@ -320,25 +314,17 @@ public class RelationshipDetector {
                 "Inverted index rebuilt. Indexed values: " + responseValueIndex.size());
     }
 
-    public int getIndexSize() {
-        return responseValueIndex.size();
-    }
+    public int getIndexSize() { return responseValueIndex.size(); }
 
     // ========================================================================
     // Utility Methods
     // ========================================================================
 
-    /**
-     * Check if two URLs match (with normalization).
-     */
     private boolean urlMatches(String url1, String url2) {
         if (url1 == null || url2 == null) return false;
-        // Normalize: strip trailing slash, fragments, lowercase
         String n1 = normalizeUrl(url1);
         String n2 = normalizeUrl(url2);
         if (n1.equals(n2)) return true;
-
-        // Also check if url1 is a relative path matching url2's path
         if (url1.startsWith("/")) {
             String path2 = RequestConverter.extractPath(url2);
             return url1.equals(path2);
@@ -349,37 +335,16 @@ public class RelationshipDetector {
     private String normalizeUrl(String url) {
         if (url == null) return "";
         String normalized = url.toLowerCase();
-        // Strip fragment
         int hashIdx = normalized.indexOf('#');
         if (hashIdx >= 0) normalized = normalized.substring(0, hashIdx);
-        // Strip trailing slash
         if (normalized.endsWith("/") && normalized.length() > 1) {
             normalized = normalized.substring(0, normalized.length() - 1);
         }
         return normalized;
     }
 
-    private boolean sameHost(RequestNode a, RequestNode b) {
-        if (a.getHost() == null || b.getHost() == null) return false;
-        return a.getHost().equalsIgnoreCase(b.getHost());
-    }
-
-    /**
-     * Check if a stronger edge already exists between two nodes.
-     */
-    private boolean hasStrongerEdge(String nodeId1, String nodeId2) {
-        for (RequestEdge edge : graph.getEdges()) {
-            if ((edge.getSourceNodeId().equals(nodeId1) && edge.getTargetNodeId().equals(nodeId2))
-                    || (edge.getSourceNodeId().equals(nodeId2) && edge.getTargetNodeId().equals(nodeId1))) {
-                if (edge.getType() != EdgeType.TIME_WINDOW) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
     private String findParamName(Map<String, Object> params, String value) {
+        if (params == null) return null;
         for (Map.Entry<String, Object> entry : params.entrySet()) {
             if (entry.getValue() != null && entry.getValue().toString().equals(value)) {
                 return entry.getKey();

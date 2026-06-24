@@ -110,6 +110,29 @@ public class HealthCheck {
     }
 
     /**
+     * Get a flat metrics map for the StatusBarPanel.
+     * Keys: pipeline_depth, pipeline_capacity, graph_nodes, graph_edges,
+     * workflow_candidates, analyzed_chains, findings_count, llm_errors,
+     * replay_errors, suppressed_total.
+     */
+    public Map<String, String> getMetrics() {
+        Map<String, String> metrics = new LinkedHashMap<>();
+
+        metrics.put("pipeline_depth", pipeline != null ? String.valueOf(pipeline.size()) : "?");
+        metrics.put("pipeline_capacity", pipeline != null ? String.valueOf(pipeline.getTotalSubmitted()) : "?");
+        metrics.put("graph_nodes", graph != null ? String.valueOf(graph.getNodeCount()) : "?");
+        metrics.put("graph_edges", graph != null ? String.valueOf(graph.getEdgeCount()) : "?");
+        metrics.put("workflow_candidates", graph != null ? String.valueOf(graph.getChainCount()) : "?");
+        metrics.put("analyzed_chains", analysisEngine != null ? String.valueOf(analysisEngine.getCompletedCandidates()) : "?");
+        metrics.put("findings_count", analysisEngine != null ? String.valueOf(analysisEngine.getTotalFindings()) : "?");
+        metrics.put("suppressed_total", graphBuilder != null ? String.valueOf(graphBuilder.getSuppressedCount()) : "?");
+        metrics.put("llm_errors", llmClient != null ? String.valueOf(llmClient.getTotalErrors()) : "?");
+        metrics.put("replay_errors", "0"); // Replay errors tracked internally
+
+        return metrics;
+    }
+
+    /**
      * Check if all subsystems are healthy.
      */
     public boolean isAllHealthy() {

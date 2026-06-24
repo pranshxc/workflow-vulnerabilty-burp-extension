@@ -4,12 +4,17 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.reflect.TypeToken;
 
+import com.workflowscanner.classification.EndpointNormalizer;
+import com.workflowscanner.classification.RequestClassification;
+import com.workflowscanner.classification.RequestClassifier;
+import com.workflowscanner.classification.EndpointKey;
 import com.workflowscanner.config.ExtensionConfig;
 import com.workflowscanner.data.CapturedRequest;
 import com.workflowscanner.data.RequestPipeline;
 import com.workflowscanner.logging.ExtensionLogger;
 import com.workflowscanner.logging.LogCategory;
 import com.workflowscanner.logging.LogLevel;
+import com.workflowscanner.workflow.WorkflowDetector;
 
 import java.io.File;
 import java.io.IOException;
@@ -30,9 +35,11 @@ import java.util.concurrent.atomic.AtomicLong;
 /**
  * Builds and maintains the request graph by:
  * 1. Consuming requests from the RequestPipeline
- * 2. Creating RequestNodes with extracted parameters
- * 3. Computing edges via RelationshipDetector
- * 4. Persisting graph data to disk
+ * 2. Classifying each request (noise filter, intent detection)
+ * 3. Creating RequestNodes with extracted parameters and endpoint keys
+ * 4. Computing edges via RelationshipDetector (filtered by ValueKind)
+ * 5. Persisting graph data to disk
+ * 6. Publishing graph update events
  *
  * Runs a background consumer thread and an auto-save scheduler.
  */
@@ -46,6 +53,20 @@ public class GraphBuilder {
     private final RelationshipDetector detector;
     private final ExtensionLogger logger;
 
+    // Classification integration (added in workflow rework)
+    private final RequestClassifier classifier = new RequestClassifier();
+    private final EndpointNormalizer normalizer = new EndpointNormalizer();
+
+    // Suppression counters
+    private final AtomicLong suppressedCount = new AtomicLong(0);
+    private final AtomicLong businessActionCount = new AtomicLong(0);
+    private final AtomicLong businessReadCount = new AtomicLong(0);
+    private final AtomicLong authenticationCount = new AtomicLong(0);
+
+    // Event listeners
+    private final List<Runnable> graphUpdateListeners = new ArrayList<>();
+    private volatile WorkflowDetector workflowDetector;
+
     private volatile RequestPipeline pipeline;
     private volatile ExtensionConfig config;
     private Thread consumerThread;
@@ -58,6 +79,32 @@ public class GraphBuilder {
         this.graph = graph;
         this.detector = new RelationshipDetector(graph, logger);
         this.logger = logger;
+    }
+
+    /**
+     * Register a listener to be notified when the graph is updated.
+     * Used by the analysis pipeline to trigger re-analysis on new data.
+     */
+    public void addGraphUpdateListener(Runnable listener) {
+        graphUpdateListeners.add(listener);
+    }
+
+    /**
+     * Set the WorkflowDetector to use for candidate detection.
+     */
+    public void setWorkflowDetector(WorkflowDetector detector) {
+        this.workflowDetector = detector;
+    }
+
+    private void notifyGraphUpdated() {
+        for (Runnable listener : graphUpdateListeners) {
+            try {
+                listener.run();
+            } catch (Exception e) {
+                logger.log(LogCategory.ERROR, LogLevel.ERROR, "GraphBuilder",
+                        "Graph update listener failed.", e);
+            }
+        }
     }
 
     /**
@@ -129,27 +176,53 @@ public class GraphBuilder {
     }
 
     /**
-     * Process a single request: create node, extract params, detect edges.
+     * Process a single request: classify, extract params, create node, detect edges.
+     * Noise requests (STATIC_ASSET, TELEMETRY_ANALYTICS, PREFLIGHT, HEALTHCHECK)
+     * are suppressed before graph insertion.
      */
     public void processRequest(CapturedRequest request) {
         try {
-            // Create node
+            // 1. Classify the request
+            RequestClassification classification = classifier.classify(request);
+            if (!classification.isWorkflowRelevant()) {
+                // Noise — skip graph insertion entirely
+                suppressedCount.incrementAndGet();
+                logger.log(LogCategory.GRAPH, LogLevel.DEBUG, "GraphBuilder",
+                        "Suppressed " + classification.getIntent() + ": "
+                                + request.getMethod() + " " + request.getPath());
+                return;
+            }
+
+            // 2. Normalize endpoint
+            EndpointKey endpointKey = normalizer.normalize(request);
+
+            // 3. Create node
             int index = graph.getNextNodeIndex();
             RequestNode node = new RequestNode(request, index);
+            node.setClassification(classification);
+            node.setEndpointKey(endpointKey);
 
-            // Extract parameters from request
+            // 4. Extract parameters from request
             Map<String, Object> params = ParameterExtractor.extractRequestParams(request);
             node.setExtractedParams(params);
 
-            // Extract response data
+            // 5. Extract response data
             Map<String, Object> responseData = ParameterExtractor.extractResponseData(request);
             node.setResponseData(responseData);
 
-            // Add node to graph
+            // 6. Add node to graph
             graph.addNode(node);
             nodesProcessed.incrementAndGet();
 
-            // Detect relationships with existing nodes (incremental)
+            // Track by intent type
+            switch (classification.getIntent()) {
+                case BUSINESS_ACTION: businessActionCount.incrementAndGet(); break;
+                case BUSINESS_READ: businessReadCount.incrementAndGet(); break;
+                case AUTHENTICATION: authenticationCount.incrementAndGet(); break;
+                default: break;
+            }
+
+            // 7. Detect relationships with existing nodes (incremental)
             List<RequestEdge> newEdges = detector.detectRelationships(node);
             for (RequestEdge edge : newEdges) {
                 graph.addEdge(edge);
@@ -162,15 +235,19 @@ public class GraphBuilder {
 
             logger.log(LogCategory.GRAPH, LogLevel.DEBUG, "GraphBuilder",
                     "Node#" + index + " added: " + request.getMethod() + " " + request.getPath()
+                            + " | Intent: " + classification.getIntent()
                             + " | Params: " + params.size()
-                            + " | Response values: " + responseData.size()
                             + " | New edges: " + newEdges.size());
+
+            // 8. Notify listeners about graph update
+            notifyGraphUpdated();
 
             // Log chain detection periodically
             if (nodesProcessed.get() % 50 == 0) {
                 RequestGraph.GraphStats stats = graph.getStats();
                 logger.log(LogCategory.GRAPH, LogLevel.INFO, "GraphBuilder",
-                        "Graph stats: " + stats);
+                        "Graph stats: " + stats
+                                + " | Suppressed: " + suppressedCount.get());
             }
 
         } catch (Exception e) {
@@ -321,6 +398,13 @@ public class GraphBuilder {
     public long getNodesProcessed() { return nodesProcessed.get(); }
     public long getEdgesCreated() { return edgesCreated.get(); }
     public boolean isRunning() { return running.get(); }
+    public long getSuppressedCount() { return suppressedCount.get(); }
+    public long getBusinessActionCount() { return businessActionCount.get(); }
+    public long getBusinessReadCount() { return businessReadCount.get(); }
+    public long getAuthenticationCount() { return authenticationCount.get(); }
+    public RequestClassifier getClassifier() { return classifier; }
+    public EndpointNormalizer getNormalizer() { return normalizer; }
+    public WorkflowDetector getWorkflowDetector() { return workflowDetector; }
 
     // --- Serialization helper ---
     private static class NodeData {

@@ -8,6 +8,8 @@ import burp.api.montoya.http.message.params.HttpParameter;
 import burp.api.montoya.http.message.params.HttpParameterType;
 import burp.api.montoya.proxy.ProxyHttpRequestResponse;
 
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -232,50 +234,38 @@ public class RequestConverter {
     }
 
     /**
-     * Extract hostname from a URL string.
+     * Extract hostname from a URL string using java.net.URI.
      */
     public static String extractHost(String url) {
-        if (url == null) return "";
+        if (url == null || url.isEmpty()) return "";
         try {
-            // Remove protocol
-            String remaining = url;
-            int protoIdx = remaining.indexOf("://");
-            if (protoIdx >= 0) {
-                remaining = remaining.substring(protoIdx + 3);
+            // Ensure URL has a protocol for URI parsing
+            String normalizedUrl = url;
+            if (!normalizedUrl.contains("://")) {
+                normalizedUrl = "http://" + normalizedUrl;
             }
-            // Remove path
-            int slashIdx = remaining.indexOf('/');
-            if (slashIdx >= 0) {
-                remaining = remaining.substring(0, slashIdx);
-            }
-            // Remove port
-            int colonIdx = remaining.indexOf(':');
-            if (colonIdx >= 0) {
-                remaining = remaining.substring(0, colonIdx);
-            }
-            return remaining;
-        } catch (Exception e) {
+            URI uri = new URI(normalizedUrl);
+            String host = uri.getHost();
+            return host != null ? host : "";
+        } catch (URISyntaxException e) {
             return "";
         }
     }
 
     /**
-     * Extract path from a URL string.
+     * Extract path from a URL string using java.net.URI.
      */
     public static String extractPath(String url) {
-        if (url == null) return "/";
+        if (url == null || url.isEmpty()) return "/";
         try {
-            int protoIdx = url.indexOf("://");
-            String remaining = protoIdx >= 0 ? url.substring(protoIdx + 3) : url;
-            int slashIdx = remaining.indexOf('/');
-            if (slashIdx >= 0) {
-                String pathAndQuery = remaining.substring(slashIdx);
-                // Remove query string
-                int queryIdx = pathAndQuery.indexOf('?');
-                return queryIdx >= 0 ? pathAndQuery.substring(0, queryIdx) : pathAndQuery;
+            String normalizedUrl = url;
+            if (!normalizedUrl.contains("://")) {
+                normalizedUrl = "http://" + normalizedUrl;
             }
-            return "/";
-        } catch (Exception e) {
+            URI uri = new URI(normalizedUrl);
+            String path = uri.getRawPath();
+            return path != null && !path.isEmpty() ? path : "/";
+        } catch (URISyntaxException e) {
             return "/";
         }
     }

@@ -1,5 +1,7 @@
 package com.workflowscanner.graph;
 
+import com.workflowscanner.classification.EndpointKey;
+import com.workflowscanner.classification.RequestClassification;
 import com.workflowscanner.data.CapturedRequest;
 
 import java.util.HashMap;
@@ -7,7 +9,8 @@ import java.util.Map;
 
 /**
  * A node in the request graph representing a single HTTP request/response.
- * Contains extracted parameters and response data for relationship detection.
+ * Contains extracted parameters, response data, intent classification,
+ * and endpoint normalization for relationship detection.
  */
 public class RequestNode {
 
@@ -23,6 +26,10 @@ public class RequestNode {
     private long timestamp;
     private int nodeIndex;
     private String groupId;  // For user-defined chains via context menu
+
+    // Classification fields (added in workflow rework)
+    private RequestClassification classification;
+    private EndpointKey endpointKey;
 
     public RequestNode(CapturedRequest request, int nodeIndex) {
         this.id = request.getId();
@@ -80,6 +87,14 @@ public class RequestNode {
 
     public String getGroupId() { return groupId; }
     public void setGroupId(String groupId) { this.groupId = groupId; }
+
+    // --- Classification (added in workflow rework) ---
+
+    public RequestClassification getClassification() { return classification; }
+    public void setClassification(RequestClassification classification) { this.classification = classification; }
+
+    public EndpointKey getEndpointKey() { return endpointKey; }
+    public void setEndpointKey(EndpointKey endpointKey) { this.endpointKey = endpointKey; }
 
     /**
      * Check if this is a redirect response (3xx).

@@ -1,5 +1,10 @@
 package com.workflowscanner.data;
 
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -47,11 +52,14 @@ public class CapturedRequest {
     }
 
     /**
-     * Generate a deduplication key based on method + URL + timestamp.
-     * Used to prevent re-ingesting the same request during backfill.
+     * Generate a deduplication key based on method + normalized URL + body hash.
+     * Uses normalized URL (no timestamp) so the same request from backfill and
+     * live proxy is deduplicated correctly.
      */
     public String getDeduplicationKey() {
-        return (method != null ? method : "") + "|" + (url != null ? url : "") + "|" + timestamp;
+        String normUrl = getNormalizedUrl();
+        String bodyHash = sha256(requestBody != null ? requestBody : "");
+        return (method != null ? method : "") + "|" + normUrl + "|" + bodyHash;
     }
 
     /**
@@ -60,6 +68,56 @@ public class CapturedRequest {
      */
     public String getFingerprint() {
         return (method != null ? method : "") + "|" + (host != null ? host : "") + "|" + (path != null ? path : "");
+    }
+
+    /**
+     * Get a normalized version of the URL: stripped of query params and fragments,
+     * trailing slash removed, lowercased. Used for deduplication.
+     */
+    public String getNormalizedUrl() {
+        if (url == null || url.isEmpty()) return "";
+        try {
+            String normalUrl = url;
+            if (!normalUrl.contains("://")) normalUrl = "http://" + normalUrl;
+            URI uri = new URI(normalUrl);
+            String result = uri.getScheme() + "://" + uri.getHost();
+            if (uri.getPort() > 0 && uri.getPort() != 80 && uri.getPort() != 443) {
+                result += ":" + uri.getPort();
+            }
+            String path = uri.getRawPath();
+            if (path != null) result += path;
+            // Remove trailing slash
+            if (result.endsWith("/") && result.length() > 1) {
+                result = result.substring(0, result.length() - 1);
+            }
+            return result.toLowerCase();
+        } catch (URISyntaxException e) {
+            // Fallback: strip query params manually
+            int qIdx = url.indexOf('?');
+            String base = qIdx >= 0 ? url.substring(0, qIdx) : url;
+            if (base.endsWith("/") && base.length() > 1) base = base.substring(0, base.length() - 1);
+            return base.toLowerCase();
+        }
+    }
+
+    /**
+     * SHA-256 hash of a string.
+     */
+    private static String sha256(String input) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] hash = md.digest(input.getBytes(StandardCharsets.UTF_8));
+            StringBuilder hexString = new StringBuilder();
+            for (byte b : hash) {
+                String hex = Integer.toHexString(0xff & b);
+                if (hex.length() == 1) hexString.append('0');
+                hexString.append(hex);
+            }
+            return hexString.toString();
+        } catch (NoSuchAlgorithmException e) {
+            // Fallback to identity hash
+            return String.valueOf(input.hashCode());
+        }
     }
 
     // --- Getters and Setters ---

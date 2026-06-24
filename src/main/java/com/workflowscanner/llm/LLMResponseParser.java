@@ -179,6 +179,78 @@ public class LLMResponseParser {
         return 0;
     }
 
+    /**
+     * Extract the workflow context/classification summary from a classify response.
+     * Looks for "workflow_context" or free-text summary in the response.
+     */
+    public static String extractChainContext(String rawResponse) {
+        try {
+            String content = extractContent(JsonParser.parseString(rawResponse).getAsJsonObject());
+            if (content == null) return "";
+
+            JsonObject json = JsonParser.parseString(content).getAsJsonObject();
+            if (json.has("workflow_context") && !json.get("workflow_context").isJsonNull()) {
+                return json.get("workflow_context").getAsString();
+            }
+            // Fallback: return first 500 chars
+            return content.length() > 500 ? content.substring(0, 500) + "..." : content;
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    /**
+     * Extract the workflow type from a classify response.
+     */
+    public static String extractWorkflowType(String rawResponse) {
+        try {
+            String content = extractContent(JsonParser.parseString(rawResponse).getAsJsonObject());
+            if (content == null) return "unknown";
+
+            JsonObject json = JsonParser.parseString(content).getAsJsonObject();
+            if (json.has("workflow_type") && !json.get("workflow_type").isJsonNull()) {
+                return json.get("workflow_type").getAsString();
+            }
+            return "unknown";
+        } catch (Exception e) {
+            return "unknown";
+        }
+    }
+
+    /**
+     * Extract vulnerability hypotheses from a hypotheses response.
+     */
+    public static List<String> extractHypotheses(String rawResponse) {
+        List<String> hypotheses = new ArrayList<>();
+        try {
+            String content = extractContent(JsonParser.parseString(rawResponse).getAsJsonObject());
+            if (content == null) return hypotheses;
+
+            JsonObject json = JsonParser.parseString(content).getAsJsonObject();
+            if (json.has("hypotheses") && json.get("hypotheses").isJsonArray()) {
+                JsonArray arr = json.getAsJsonArray("hypotheses");
+                for (JsonElement el : arr) {
+                    if (el.isJsonPrimitive()) {
+                        hypotheses.add(el.getAsString());
+                    } else if (el.isJsonObject() && el.getAsJsonObject().has("description")) {
+                        hypotheses.add(el.getAsJsonObject().get("description").getAsString());
+                    }
+                }
+            }
+            // Fallback: parse from free text
+            if (hypotheses.isEmpty() && content.contains("hypothesis")) {
+                String[] lines = content.split("\n");
+                for (String line : lines) {
+                    String trimmed = line.trim();
+                    if (trimmed.matches("(?i).*hypothesis.*:.*") || trimmed.matches("^\\d+\\.\\s.*")) {
+                        hypotheses.add(trimmed);
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        return hypotheses;
+    }
+
     // --- Utility ---
 
     private static String getStringOrNull(JsonObject json, String key) {

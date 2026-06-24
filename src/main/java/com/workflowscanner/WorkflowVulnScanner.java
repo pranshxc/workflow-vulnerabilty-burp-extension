@@ -5,6 +5,7 @@ import burp.api.montoya.MontoyaApi;
 import burp.api.montoya.extension.ExtensionUnloadingHandler;
 
 import com.workflowscanner.analysis.ChainVerdict;
+import com.workflowscanner.analysis.ApplicationModel;
 import com.workflowscanner.config.ConfigValidator;
 import com.workflowscanner.config.ExtensionConfig;
 import com.workflowscanner.logging.ExtensionLogger;
@@ -21,6 +22,8 @@ import com.workflowscanner.analysis.AnalysisEngine;
 import com.workflowscanner.validation.ValidationEngine;
 import com.workflowscanner.advisory.AdvisoryManager;
 import com.workflowscanner.ui.MainTabPanel;
+import com.workflowscanner.workflow.WorkflowDetector;
+import com.workflowscanner.workflow.WorkflowCandidate;
 
 import java.util.List;
 
@@ -57,6 +60,8 @@ public class WorkflowVulnScanner implements BurpExtension {
     private BackfillService backfillService;
     private HealthCheck healthCheck;
     private MainTabPanel mainTabPanel;
+    private WorkflowDetector workflowDetector;
+    private ApplicationModel applicationModel;
 
     @Override
     public void initialize(MontoyaApi api) {
@@ -243,9 +248,19 @@ public class WorkflowVulnScanner implements BurpExtension {
 
     private void initAnalysisEngine() {
         try {
+            this.applicationModel = new ApplicationModel();
+            this.workflowDetector = new WorkflowDetector(logger);
             this.analysisEngine = new AnalysisEngine(graph, llmClient, config, logger);
+            analysisEngine.setWorkflowDetector(workflowDetector);
+            analysisEngine.setApplicationModel(applicationModel);
+
+            // Connect graph builder to workflow detector
+            if (graphBuilder != null) {
+                graphBuilder.setWorkflowDetector(workflowDetector);
+            }
+
             logger.log(LogCategory.EXTENSION, LogLevel.INFO, "WorkflowVulnScanner",
-                    "Analysis engine initialized.");
+                    "Analysis engine initialized with WorkflowDetector.");
         } catch (Exception e) {
             logger.log(LogCategory.ERROR, LogLevel.ERROR, "WorkflowVulnScanner",
                     "Failed to initialize analysis engine.", e);
@@ -279,11 +294,23 @@ public class WorkflowVulnScanner implements BurpExtension {
     // ========================================================================
 
     /**
-     * Wire the full pipeline: analysis -> validation -> advisory.
+     * Wire the full pipeline: graph update -> candidate detection -> analysis -> validation -> advisory.
      * This is the critical integration step that connects all subsystems.
      */
     private void wirePipeline() {
         try {
+            // Auto-analyze when graph is updated (if auto-analyze is enabled)
+            if (graphBuilder != null && analysisEngine != null) {
+                graphBuilder.addGraphUpdateListener(() -> {
+                    if (config.isAutoAnalyzeNewChains() && !analysisEngine.isRunning()) {
+                        logger.log(LogCategory.ANALYSIS, LogLevel.INFO, "Pipeline",
+                                "Graph updated, triggering auto-analysis.");
+                        eventBus.publish(EventBus.Event.GRAPH_UPDATED);
+                        analysisEngine.start();
+                    }
+                });
+            }
+
             // When analysis completes a verdict, auto-validate and create advisory
             if (analysisEngine != null) {
                 analysisEngine.addVerdictListener(verdict -> {
@@ -340,10 +367,10 @@ public class WorkflowVulnScanner implements BurpExtension {
     private void initUI() {
         try {
             this.mainTabPanel = new MainTabPanel(api, config, logger, graph, graphBuilder,
-                    pipeline, llmClient, analysisEngine, advisoryManager, backfillService);
+                    pipeline, llmClient, analysisEngine, advisoryManager, backfillService, healthCheck);
             api.userInterface().registerSuiteTab(EXTENSION_NAME, mainTabPanel.getComponent());
             logger.log(LogCategory.EXTENSION, LogLevel.INFO, "WorkflowVulnScanner",
-                    "UI panels registered.");
+                    "UI panels registered with status bar.");
         } catch (Exception e) {
             logger.log(LogCategory.ERROR, LogLevel.ERROR, "WorkflowVulnScanner",
                     "Failed to initialize UI.", e);
