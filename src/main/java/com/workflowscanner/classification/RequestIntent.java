@@ -26,6 +26,9 @@ public enum RequestIntent {
     PREFLIGHT,
     /** Health check or monitoring endpoint */
     HEALTHCHECK,
+    /** Authentication context read (e.g. /api/me, /api/user) — not a workflow step,
+     *  but retained for ApplicationModel context */
+    CONTEXT_READ,
     /** Cannot determine intent confidently */
     UNKNOWN
 }

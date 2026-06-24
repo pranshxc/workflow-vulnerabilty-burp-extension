@@ -26,6 +26,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.DoubleSupplier;
 
 /**
  * Graph visualization panel with chain explorer.
@@ -142,7 +143,7 @@ public class GraphPanel extends JPanel {
 
         chainListModel = new DefaultListModel<>();
         chainList = new JList<>(chainListModel);
-        chainList.setCellRenderer(new ChainListRenderer());
+        chainList.setCellRenderer(new ChainListRenderer(() -> config != null ? config.getWorkflowScoreThreshold() : 20.0));
         chainList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
         chainList.addListSelectionListener(e -> {
             if (!e.getValueIsAdjusting()) onChainSelected();
@@ -640,9 +641,9 @@ public class GraphPanel extends JPanel {
             this.verdict = verdict;
         }
 
-        String getStatusIcon() {
+        String getStatusIcon(double threshold) {
             if (verdict == null) {
-                if (candidate.getWorkflowScore() >= 20) return "\u25B6"; // play
+                if (candidate.getWorkflowScore() >= threshold) return "\u25B6"; // play
                 return "\u25CB"; // empty circle
             }
             if (verdict.isVulnerable()) return "\u2605"; // star
@@ -650,9 +651,9 @@ public class GraphPanel extends JPanel {
             return "\u2713"; // checkmark
         }
 
-        Color getStatusColor() {
+        Color getStatusColor(double threshold) {
             if (verdict == null) {
-                if (candidate.getWorkflowScore() >= 20) return new Color(0, 100, 200); // blue for analysis-ready
+                if (candidate.getWorkflowScore() >= threshold) return new Color(0, 100, 200); // blue for analysis-ready
                 return Color.GRAY;
             }
             if (verdict.isVulnerable()) return Color.RED;
@@ -667,16 +668,23 @@ public class GraphPanel extends JPanel {
     }
 
     private static class ChainListRenderer extends DefaultListCellRenderer {
+        private final DoubleSupplier thresholdSupplier;
+
+        ChainListRenderer(DoubleSupplier thresholdSupplier) {
+            this.thresholdSupplier = thresholdSupplier;
+        }
+
         @Override
         public Component getListCellRendererComponent(JList<?> list, Object value,
                                                        int index, boolean isSelected, boolean cellHasFocus) {
             super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus);
             if (value instanceof ChainItem) {
                 ChainItem item = (ChainItem) value;
+                double threshold = thresholdSupplier.getAsDouble();
                 String host = item.candidate.getSteps().isEmpty()
                         ? "?" : item.candidate.getSteps().get(0).getHost();
                 setText(String.format("%s [%.0f] %s %s (%d) - %s",
-                        item.getStatusIcon(),
+                        item.getStatusIcon(threshold),
                         item.candidate.getWorkflowScore(),
                         item.candidate.getWorkflowType().name().substring(0, Math.min(4,
                                 item.candidate.getWorkflowType().name().length())),
@@ -684,7 +692,7 @@ public class GraphPanel extends JPanel {
                         item.candidate.size(),
                         host));
                 if (!isSelected) {
-                    setForeground(item.getStatusColor());
+                    setForeground(item.getStatusColor(threshold));
                 }
             }
             return this;

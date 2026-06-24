@@ -67,8 +67,12 @@ public class ApplicationModel {
 
     /**
      * Build application model context from a list of nodes in a candidate.
+     * Learns endpoints per-node, then infers state transitions from adjacent pairs.
      */
     public void learnFromCandidate(List<RequestNode> steps) {
+        if (steps == null || steps.isEmpty()) return;
+
+        // Phase 1: per-node learning (endpoints, object IDs, auth boundaries)
         for (RequestNode node : steps) {
             if (node.getEndpointKey() != null) {
                 addEndpoint(node.getEndpointKey());
@@ -93,6 +97,48 @@ public class ApplicationModel {
                         node.getStatusCode() >= 200 && node.getStatusCode() < 300);
             }
         }
+
+        // Phase 2: infer adjacent state transitions from consecutive step pairs
+        for (int i = 1; i < steps.size(); i++) {
+            RequestNode prev = steps.get(i - 1);
+            RequestNode curr = steps.get(i);
+            inferTransition(prev, curr);
+        }
+    }
+
+    /**
+     * Infer a state transition between two adjacent steps in a workflow.
+     * The "from state" is the previous step's path family (2 segments),
+     * the "to state" is the current step's path family.
+     */
+    private void inferTransition(RequestNode prev, RequestNode curr) {
+        String fromState = extractStateKey(prev);
+        String toState = extractStateKey(curr);
+        if (fromState == null || toState == null || fromState.equals(toState)) return;
+
+        String endpoint = curr.getMethod() + " " + (curr.getPath() != null ? curr.getPath() : "");
+        addStateTransition(fromState, toState, endpoint);
+    }
+
+    /**
+     * Extract a state key from a node: the first 2 path segments.
+     * e.g. /cart/items -> "cart/items", /checkout/address -> "checkout/address"
+     */
+    private String extractStateKey(RequestNode node) {
+        if (node == null || node.getPath() == null) return null;
+        String path = node.getPath().toLowerCase();
+        String[] segments = path.split("/");
+        StringBuilder key = new StringBuilder();
+        int count = 0;
+        for (String seg : segments) {
+            if (!seg.isEmpty()) {
+                if (key.length() > 0) key.append("/");
+                key.append(seg);
+                count++;
+                if (count >= 2) break;
+            }
+        }
+        return key.length() > 0 ? key.toString() : null;
     }
 
     /**

@@ -1,5 +1,6 @@
 package com.workflowscanner.graph;
 
+import com.workflowscanner.config.ExtensionConfig;
 import com.workflowscanner.workflow.WorkflowCandidate;
 import com.workflowscanner.workflow.WorkflowDetector;
 
@@ -36,6 +37,10 @@ public class RequestGraph {
     // Adjacency lists for efficient traversal
     private final Map<String, List<String>> outgoing = new ConcurrentHashMap<>(); // nodeId -> [targetIds]
     private final Map<String, List<String>> incoming = new ConcurrentHashMap<>(); // nodeId -> [sourceIds]
+
+    // Optional reference for enriching graph stats with candidate counts
+    private volatile WorkflowDetector workflowDetector;
+    private volatile ExtensionConfig config;
 
     // --- Node Operations ---
 
@@ -252,11 +257,48 @@ public class RequestGraph {
         return nextNodeIndex++;
     }
 
+    /**
+     * Set a reference to the WorkflowDetector for enriching graph statistics
+     * with workflow candidate counts.
+     */
+    public void setWorkflowDetector(WorkflowDetector detector, ExtensionConfig cfg) {
+        this.workflowDetector = detector;
+        this.config = cfg;
+    }
+
+    /**
+     * Repair nextNodeIndex to be higher than any existing node index.
+     * Should be called after loading nodes from serialized state.
+     */
+    public synchronized void recalculateNextNodeIndex() {
+        int maxIndex = 0;
+        for (RequestNode node : nodes.values()) {
+            int nodeIndex = node.getNodeIndex();
+            if (nodeIndex >= maxIndex) {
+                maxIndex = nodeIndex + 1;
+            }
+        }
+        if (maxIndex > nextNodeIndex) {
+            nextNodeIndex = maxIndex;
+        }
+    }
+
     public GraphStats getStats() {
         List<List<RequestNode>> components = getConnectedComponents();
-        int maxChainLength = components.isEmpty() ? 0 : components.get(0).size();
-        return new GraphStats(nodes.size(), edges.size(), components.size(),
-                maxChainLength, getAllHosts().size());
+        int maxComponentSize = components.isEmpty() ? 0 : components.get(0).size();
+        GraphStats stats = new GraphStats(nodes.size(), edges.size(), components.size(),
+                maxComponentSize, getAllHosts().size());
+        // Populate candidate counts from workflow detector if set
+        if (workflowDetector != null) {
+            List<WorkflowCandidate> lastResults = workflowDetector.getLastResults();
+            stats.workflowCandidateCount = lastResults.size();
+            stats.analysisReadyCandidateCount = (int) lastResults.stream()
+                    .filter(c -> c.getWorkflowScore() >= config.getWorkflowScoreThreshold())
+                    .count();
+            stats.displayOnlyCandidateCount = stats.workflowCandidateCount
+                    - stats.analysisReadyCandidateCount;
+        }
+        return stats;
     }
 
     /**
@@ -275,23 +317,34 @@ public class RequestGraph {
     public static class GraphStats {
         public final int nodeCount;
         public final int edgeCount;
-        public final int chainCount;
-        public final int maxChainLength;
+        public final int componentCount;
+        public final int maxComponentSize;
         public final int hostCount;
 
-        public GraphStats(int nodeCount, int edgeCount, int chainCount,
-                          int maxChainLength, int hostCount) {
+        // Candidate count placeholders; populated externally by WorkflowDetector
+        public int workflowCandidateCount;
+        public int analysisReadyCandidateCount;
+        public int displayOnlyCandidateCount;
+
+        public GraphStats(int nodeCount, int edgeCount, int componentCount,
+                          int maxComponentSize, int hostCount) {
             this.nodeCount = nodeCount;
             this.edgeCount = edgeCount;
-            this.chainCount = chainCount;
-            this.maxChainLength = maxChainLength;
+            this.componentCount = componentCount;
+            this.maxComponentSize = maxComponentSize;
             this.hostCount = hostCount;
         }
 
         @Override
         public String toString() {
-            return String.format("Nodes: %d, Edges: %d, Chains: %d, Max chain: %d, Hosts: %d",
-                    nodeCount, edgeCount, chainCount, maxChainLength, hostCount);
+            StringBuilder sb = new StringBuilder();
+            sb.append(String.format("Nodes: %d, Edges: %d, Components: %d, Max component: %d, Hosts: %d",
+                    nodeCount, edgeCount, componentCount, maxComponentSize, hostCount));
+            if (workflowCandidateCount > 0) {
+                sb.append(String.format(", Candidates: %d (analysis-ready: %d, display-only: %d)",
+                        workflowCandidateCount, analysisReadyCandidateCount, displayOnlyCandidateCount));
+            }
+            return sb.toString();
         }
     }
 }

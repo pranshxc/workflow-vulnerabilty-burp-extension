@@ -170,6 +170,8 @@ public class ParameterExtractor {
     /**
      * Get all "interesting" values from a map (values meeting minimum length and kind criteria).
      * Uses ValueKind classification to filter out session cookies, booleans, enums, etc.
+     * Each value is classified by name+value pair; only values whose kind is
+     * correlation-relevant (BUSINESS_ID, SECURITY_TOKEN, MONEY, EMAIL) are returned.
      */
     public static Set<String> getInterestingValues(Map<String, Object> params) {
         Set<String> values = new HashSet<>();
@@ -177,8 +179,13 @@ public class ParameterExtractor {
             Object value = entry.getValue();
             if (value != null) {
                 String strValue = value.toString();
-                if (strValue.length() >= MIN_VALUE_LENGTH && !isCommonValue(strValue)) {
-                    values.add(strValue);
+                // Reject values that are too short, but also use ValueKind to filter
+                // low-entropy values ignored by the older isCommonValue heuristic
+                if (strValue.length() >= MIN_VALUE_LENGTH) {
+                    ValueKind kind = ValueKind.classify(entry.getKey(), strValue);
+                    if (kind.isCorrelationRelevant()) {
+                        values.add(strValue);
+                    }
                 }
             }
         }
@@ -307,16 +314,5 @@ public class ParameterExtractor {
             }
         }
         return null;
-    }
-
-    /**
-     * Check if a value is too common to be useful for correlation.
-     */
-    private static boolean isCommonValue(String value) {
-        String lower = value.toLowerCase();
-        return lower.equals("true") || lower.equals("false")
-                || lower.equals("null") || lower.equals("none")
-                || lower.equals("undefined") || lower.equals("text/html")
-                || lower.equals("application/json") || lower.equals("utf-8");
     }
 }

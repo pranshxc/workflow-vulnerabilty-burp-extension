@@ -26,8 +26,10 @@ import com.workflowscanner.workflow.WorkflowDetector;
 import com.workflowscanner.workflow.WorkflowCandidate;
 
 import java.util.List;
-import java.util.Timer;
-import java.util.TimerTask;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -54,8 +56,9 @@ public class WorkflowVulnScanner implements BurpExtension {
     private ExtensionConfig config;
     
     // Auto-analysis debounce
-    private final AtomicBoolean autoAnalysisScheduled = new AtomicBoolean(false);
-    private Timer autoAnalysisTimer;
+    private final ScheduledExecutorService autoAnalysisScheduler = Executors.newSingleThreadScheduledExecutor(
+            r -> new Thread(r, "auto-analysis-debounce"));
+    private volatile ScheduledFuture<?> pendingAutoAnalysis;
     
     private EventBus eventBus;
     private RequestGraph graph;
@@ -317,26 +320,18 @@ public class WorkflowVulnScanner implements BurpExtension {
             if (graphBuilder != null && analysisEngine != null) {
                 graphBuilder.addGraphUpdateListener(() -> {
                     if (config.isAutoAnalyzeNewChains() && !analysisEngine.isRunning()) {
-                        // Debounce: reset timer on each graph update (2s debounce window)
-                        if (autoAnalysisTimer == null) {
-                            autoAnalysisTimer = new Timer("auto-analysis-debounce", true);
+                        // Debounce: cancel pending analysis and reschedule (2s delay)
+                        if (pendingAutoAnalysis != null && !pendingAutoAnalysis.isDone()) {
+                            pendingAutoAnalysis.cancel(false);
                         }
-                        // Cancel pending execution if one is scheduled
-                        if (autoAnalysisScheduled.getAndSet(true)) {
-                            autoAnalysisTimer.purge();
-                        }
-                        autoAnalysisTimer.schedule(new TimerTask() {
-                            @Override
-                            public void run() {
-                                if (!analysisEngine.isRunning()) {
-                                    autoAnalysisScheduled.set(false);
-                                    logger.log(LogCategory.ANALYSIS, LogLevel.INFO, "Pipeline",
-                                            "Graph updated (debounced), triggering auto-analysis.");
-                                    eventBus.publish(EventBus.Event.GRAPH_UPDATED);
-                                    analysisEngine.start();
-                                }
+                        pendingAutoAnalysis = autoAnalysisScheduler.schedule(() -> {
+                            if (!analysisEngine.isRunning()) {
+                                logger.log(LogCategory.ANALYSIS, LogLevel.INFO, "Pipeline",
+                                        "Graph updated (debounced), triggering auto-analysis.");
+                                eventBus.publish(EventBus.Event.GRAPH_UPDATED);
+                                analysisEngine.start();
                             }
-                        }, 2000L); // 2-second debounce
+                        }, 2, TimeUnit.SECONDS);
                     }
                 });
             }

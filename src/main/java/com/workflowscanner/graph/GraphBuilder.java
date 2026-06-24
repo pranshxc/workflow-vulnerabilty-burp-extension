@@ -91,9 +91,13 @@ public class GraphBuilder {
 
     /**
      * Set the WorkflowDetector to use for candidate detection.
+     * Also propagates to the underlying graph for enriched stats.
      */
     public void setWorkflowDetector(WorkflowDetector detector) {
         this.workflowDetector = detector;
+        if (detector != null && config != null) {
+            graph.setWorkflowDetector(detector, config);
+        }
     }
 
     private void notifyGraphUpdated() {
@@ -114,6 +118,10 @@ public class GraphBuilder {
     public void start(RequestPipeline pipeline, ExtensionConfig config) {
         this.pipeline = pipeline;
         this.config = config;
+        // Propagate config to graph for enriched stats when workflow detector is set
+        if (workflowDetector != null && config != null) {
+            graph.setWorkflowDetector(workflowDetector, config);
+        }
 
         if (running.get()) {
             logger.log(LogCategory.GRAPH, LogLevel.WARN, "GraphBuilder",

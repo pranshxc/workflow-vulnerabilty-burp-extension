@@ -11,6 +11,7 @@ import com.workflowscanner.logging.LogCategory;
 import com.workflowscanner.logging.LogLevel;
 
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -221,14 +222,19 @@ public class RelationshipDetector {
                 if (sourceNode == null || sourceNode.getTimestamp() >= newNode.getTimestamp()) continue;
 
                 String responseName = findParamName(sourceNode.getResponseData(), paramValue);
-                edges.add(new RequestEdge(
+                RequestEdge edge = new RequestEdge(
                         sourceNodeId, newNode.getId(),
                         EdgeType.PARAM_REUSE, 0.8,
                         "Value '" + truncate(paramValue, 40) + "' from response "
                                 + (responseName != null ? "(" + responseName + ")" : "")
                                 + " of Node#" + sourceNode.getNodeIndex()
                                 + " reused in request (" + paramName + ")"
-                                + " of Node#" + newNode.getNodeIndex()));
+                                + " of Node#" + newNode.getNodeIndex());
+                // Populate value semantics
+                edge.setValueKind(ValueKind.classify(paramName, paramValue));
+                edge.setParamName(paramName);
+                edge.setValueHash(sha256(paramValue));
+                edges.add(edge);
             }
         }
         return edges;
@@ -356,5 +362,18 @@ public class RelationshipDetector {
     private String truncate(String s, int maxLen) {
         if (s == null) return "";
         return s.length() <= maxLen ? s : s.substring(0, maxLen) + "...";
+    }
+
+    /**
+     * SHA-256 hash a string.
+     */
+    private static String sha256(String input) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] hash = md.digest(input.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(hash);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            return Integer.toHexString(input.hashCode());
+        }
     }
 }

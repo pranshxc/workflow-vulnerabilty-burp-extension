@@ -3,6 +3,7 @@ package com.workflowscanner.workflow;
 import com.workflowscanner.classification.EdgeStrength;
 import com.workflowscanner.classification.RequestClassification;
 import com.workflowscanner.config.ExtensionConfig;
+import com.workflowscanner.graph.EdgeType;
 import com.workflowscanner.graph.RequestEdge;
 import com.workflowscanner.graph.RequestGraph;
 import com.workflowscanner.graph.RequestNode;
@@ -12,6 +13,7 @@ import com.workflowscanner.logging.LogCategory;
 import com.workflowscanner.logging.LogLevel;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -81,36 +83,188 @@ public class WorkflowDetector {
     /**
      * Detect workflow candidates with supporting graph edge attachment.
      * Internal method that takes explicit graph references.
+     * Pipeline:
+     * 1. Session-only detection (stateless)
+     * 2. Merge candidates with strong cross-candidate edges
+     * 3. Attach internal supporting edges
+     * 4. Score
+     * 5. Prioritize
      */
     public List<WorkflowCandidate> detect(List<RequestNode> allNodes,
                                            RequestGraph graph,
                                            RelationshipDetector detector) {
         if (allNodes == null || allNodes.isEmpty()) return List.of();
 
-        // 1. Filter to workflow-relevant nodes, then sessionize
+        // 1. Session-only detection
         List<WorkflowCandidate> candidates = detectSessionOnly(allNodes);
         if (candidates.isEmpty()) return candidates;
 
-        // 2. Attach supporting edges for each candidate (all-pairs within candidate)
-        for (WorkflowCandidate candidate : candidates) {
+        // 2. Merge candidates with strong cross-candidate edges
+        List<WorkflowCandidate> merged = mergeCandidatesByStrongEdges(
+                candidates, graph, detector);
+
+        // 3. Attach supporting edges within each candidate
+        for (WorkflowCandidate candidate : merged) {
             attachSupportingEdges(candidate, graph, detector);
         }
 
-        // 3. Re-score now that edges are attached
-        for (WorkflowCandidate candidate : candidates) {
+        // 4. Score
+        for (WorkflowCandidate candidate : merged) {
             double score = scorer.score(candidate);
             candidate.setWorkflowScore(score);
         }
 
-        // 4. Re-prioritize
-        List<WorkflowCandidate> prioritized = scorer.prioritize(candidates);
+        // 5. Prioritize
+        List<WorkflowCandidate> prioritized = scorer.prioritize(merged);
 
         logger.log(LogCategory.GRAPH, LogLevel.INFO, "WorkflowDetector",
                 "Edge-aware detection: " + prioritized.size()
-                        + " candidates with supporting edges.");
+                        + " candidates (merged from " + candidates.size()
+                        + " session-only candidates) with supporting edges.");
 
         lastResults = prioritized;
         return prioritized;
+    }
+
+    /**
+     * Merge session-split candidates that have STRONG cross-candidate edges.
+     * Conditions:
+     * - STRONG edge type PARAM_REUSE, REDIRECT, or USER_DEFINED
+     * - Same host and compatible session
+     * - Candidate A is chronologically before candidate B
+     * - Gap between A's last step and B's first step <= session window
+     */
+    private List<WorkflowCandidate> mergeCandidatesByStrongEdges(
+            List<WorkflowCandidate> candidates,
+            RequestGraph graph,
+            RelationshipDetector detector) {
+
+        if (candidates.size() < 2) return new ArrayList<>(candidates);
+
+        long sessionWindowMs = config.getWorkflowSessionWindowMs();
+        List<WorkflowCandidate> merged = new ArrayList<>();
+        Set<String> consumed = new HashSet<>();
+
+        for (int i = 0; i < candidates.size(); i++) {
+            if (consumed.contains(candidates.get(i).getId())) continue;
+
+            WorkflowCandidate a = candidates.get(i);
+            boolean anyMerge = false;
+
+            for (int j = i + 1; j < candidates.size(); j++) {
+                if (consumed.contains(candidates.get(j).getId())) continue;
+                WorkflowCandidate b = candidates.get(j);
+
+                if (shouldMerge(a, b, graph, detector, sessionWindowMs)) {
+                    // Merge b into a
+                    for (RequestNode step : b.getSteps()) {
+                        a.addStep(step);
+                    }
+                    // Carry over evidence
+                    if (a.getEvidence() != null && b.getEvidence() != null) {
+                        for (String signal : b.getEvidence().getContinuationSignals()) {
+                            a.getEvidence().addContinuationSignal("merged: " + signal);
+                        }
+                    }
+                    // Re-sort steps by timestamp
+                    List<RequestNode> sortedSteps = new ArrayList<>(a.getSteps());
+                    sortedSteps.sort(Comparator.comparingLong(RequestNode::getTimestamp));
+                    // Clear and re-add in order
+                    a.getSteps().clear();
+                    for (RequestNode step : sortedSteps) {
+                        a.addStep(step);
+                    }
+                    consumed.add(b.getId());
+                    anyMerge = true;
+
+                    logger.log(LogCategory.GRAPH, LogLevel.INFO, "WorkflowDetector",
+                            "Merged candidate " + b.getId() + " into " + a.getId()
+                                    + " (strong cross-candidate edges)");
+                }
+            }
+
+            if (!consumed.contains(a.getId())) {
+                merged.add(a);
+                consumed.add(a.getId());
+            }
+        }
+
+        return merged;
+    }
+
+    /**
+     * Check if candidate B should be merged into candidate A.
+     */
+    private boolean shouldMerge(WorkflowCandidate a, WorkflowCandidate b,
+                                 RequestGraph graph,
+                                 RelationshipDetector detector,
+                                 long sessionWindowMs) {
+        // Same host
+        String hostA = firstHost(a);
+        String hostB = firstHost(b);
+        if (hostA == null || hostB == null || !hostA.equalsIgnoreCase(hostB)) return false;
+
+        // Compatible session keys
+        if (!sessionsCompatible(a.getSessionKey(), b.getSessionKey())) return false;
+
+        // A before B chronologically
+        long aLastTs = a.getLastStep() != null ? a.getLastStep().getTimestamp() : 0;
+        long bFirstTs = b.getSteps().isEmpty() ? 0 : b.getSteps().get(0).getTimestamp();
+        if (aLastTs >= bFirstTs) return false;
+
+        // Gap between A's last and B's first <= session window
+        long gap = bFirstTs - aLastTs;
+        if (gap > sessionWindowMs) return false;
+
+        // Find strong cross-candidate edges of relevant types
+        for (RequestNode sourceNode : a.getSteps()) {
+            for (RequestNode targetNode : b.getSteps()) {
+                List<RequestEdge> between = findEdgesBetween(graph, sourceNode, targetNode);
+                for (RequestEdge edge : between) {
+                    EdgeStrength strength = detector.getEdgeStrength(edge, sourceNode, targetNode);
+                    if (strength == EdgeStrength.STRONG) {
+                        EdgeType type = edge.getType();
+                        if (type == EdgeType.PARAM_REUSE
+                                || type == EdgeType.REDIRECT
+                                || type == EdgeType.USER_DEFINED) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Check if two session keys are compatible for merging.
+     * They merge if they share the same host and auth hash.
+     */
+    private boolean sessionsCompatible(Object keyA, Object keyB) {
+        if (keyA == null || keyB == null) return false;
+        String a = keyA.toString();
+        String b = keyB.toString();
+        // Same session key → compatible
+        if (a.equals(b)) return true;
+        // Compatible if both have same host segment and non-empty auth
+        String[] aParts = a.split(",");
+        String[] bParts = b.split(",");
+        if (aParts.length > 0 && bParts.length > 0
+                && aParts[0].equals(bParts[0])) {
+            // Same host — if both have auth, they must match
+            if (aParts.length > 1 && bParts.length > 1) {
+                return aParts[1].equals(bParts[1]);
+            }
+            // One or both lack auth — allow merge
+            return true;
+        }
+        return false;
+    }
+
+    private String firstHost(WorkflowCandidate c) {
+        if (c.getSteps().isEmpty()) return null;
+        return c.getSteps().get(0).getHost();
     }
 
     /**
@@ -192,6 +346,7 @@ public class WorkflowDetector {
     /**
      * Session-only detection: filter by workflow relevance, segment by session,
      * score, prioritize. No edge attachment.
+     * Uses stateless full-graph segmentation — safe for UI/analysis threads.
      */
     public List<WorkflowCandidate> detectSessionOnly(List<RequestNode> allNodes) {
         if (allNodes == null || allNodes.isEmpty()) return List.of();
@@ -217,8 +372,9 @@ public class WorkflowDetector {
                         + relevantNodes.size() + " workflow-relevant, "
                         + suppressedCount + " suppressed");
 
-        // 2. Segment by session into candidates
-        List<WorkflowCandidate> candidates = sessionizer.segment(relevantNodes);
+        // 2. Segment by session into candidates (stateless full-graph mode)
+        List<WorkflowCandidate> candidates = WorkflowSessionizer.segmentFullGraph(
+                relevantNodes, config, logger);
 
         if (candidates.isEmpty()) {
             logger.log(LogCategory.GRAPH, LogLevel.INFO, "WorkflowDetector",

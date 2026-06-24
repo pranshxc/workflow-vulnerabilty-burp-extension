@@ -77,20 +77,31 @@ public class RequestClassifier {
                     "Static asset file");
         }
 
-        // Priority 7: Background polling
+        // Priority 7: Auth context reads (e.g. /api/me)
+        // These are not workflow steps but carry user context for the ApplicationModel
+        if (StaticNoiseRules.isContextReadPath(path)) {
+            if (StaticNoiseRules.isJsonResponse(mimeType)) {
+                return RequestClassification.background(RequestIntent.CONTEXT_READ,
+                        "Auth context read (retained for ApplicationModel)");
+            }
+            return RequestClassification.background(RequestIntent.CONTEXT_READ,
+                    "Auth context read (non-JSON, retained)");
+        }
+
+        // Priority 8: Background polling
         if (StaticNoiseRules.isPollingPath(path)) {
             return RequestClassification.background(RequestIntent.BACKGROUND_POLLING,
                     "Background polling endpoint");
         }
 
-        // Priority 8: Authentication paths
+        // Priority 9: Authentication paths
         if (BusinessKeywordRules.isAuthPath(path)) {
             EndpointKey key = endpointNormalizer.normalize(request);
             return RequestClassification.relevant(RequestIntent.AUTHENTICATION, 8.0,
                     "Authentication endpoint", key);
         }
 
-        // Priority 9: Business paths with state-changing methods
+        // Priority 10: Business paths with state-changing methods
         int businessScore = BusinessKeywordRules.scorePath(path);
         boolean isStateChanging = BusinessKeywordRules.isStateChanging(method);
         boolean isFinancial = BusinessKeywordRules.isFinancialPath(path);

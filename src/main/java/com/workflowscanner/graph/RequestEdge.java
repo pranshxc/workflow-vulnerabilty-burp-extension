@@ -1,8 +1,12 @@
 package com.workflowscanner.graph;
 
+import com.workflowscanner.classification.ValueKind;
+
 /**
  * An edge in the request graph representing a relationship between two requests.
  * Each edge has a type, confidence score, and human-readable evidence string.
+ * Optionally carries value semantics (kind, parameter name, value hash) for
+ * business value flow analysis.
  */
 public class RequestEdge {
 
@@ -11,6 +15,11 @@ public class RequestEdge {
     private EdgeType type;
     private double confidence;
     private String evidence;
+
+    // Value-flow semantics (optional, populated by RelationshipDetector)
+    private ValueKind valueKind;
+    private String paramName;
+    private String valueHash;
 
     public RequestEdge(String sourceNodeId, String targetNodeId, EdgeType type,
                        double confidence, String evidence) {
@@ -39,8 +48,34 @@ public class RequestEdge {
     public String getEvidence() { return evidence; }
     public void setEvidence(String evidence) { this.evidence = evidence; }
 
+    public ValueKind getValueKind() { return valueKind; }
+    public void setValueKind(ValueKind valueKind) { this.valueKind = valueKind; }
+
+    public String getParamName() { return paramName; }
+    public void setParamName(String paramName) { this.paramName = paramName; }
+
+    public String getValueHash() { return valueHash; }
+    public void setValueHash(String valueHash) { this.valueHash = valueHash; }
+
+    /**
+     * Returns true if this edge represents a business value flow — i.e.,
+     * a parameter value reused from one request to another with semantic meaning.
+     * Checks both edge type (PARAM_REUSE, USER_DEFINED) and the value's semantic kind.
+     */
+    public boolean isBusinessValueFlow() {
+        if (type != EdgeType.PARAM_REUSE && type != EdgeType.USER_DEFINED) return false;
+        if (valueKind == null) return true; // legacy — assume business value
+        return valueKind.isBusinessValue();
+    }
+
     @Override
     public String toString() {
-        return String.format("%s -[%s %.2f]-> %s", sourceNodeId, type, confidence, targetNodeId);
+        StringBuilder sb = new StringBuilder();
+        sb.append(String.format("%s -[%s %.2f]-> %s", sourceNodeId, type, confidence, targetNodeId));
+        if (valueKind != null) {
+            sb.append(" [").append(valueKind).append("]");
+            if (paramName != null) sb.append(" ").append(paramName);
+        }
+        return sb.toString();
     }
 }

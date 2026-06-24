@@ -40,9 +40,15 @@ public class StaticNoiseRules {
             "notifications", "notification", "messages/unread", "unread-count",
             "unread_count", "heartbeat", "poll", "events", "feature-flags",
             "feature_flags", "flags", "config", "configuration",
-            "/api/me", "/api/user", "/api/v1/me", "/api/v1/user",
             "session/refresh", "token/refresh", "keepalive", "keep-alive",
             "presence", "online", "typing", "sse", "websocket");
+
+    // Context read paths — not workflow steps, not noise, retain for ApplicationModel
+    // These carry auth context (user_id, role, org, permissions) useful for LLM prompts
+    private static final Set<String> CONTEXT_READ_PATHS = Set.of(
+            "/api/me", "/api/user", "/api/v1/me", "/api/v1/user",
+            "/me", "/user", "/account", "/profile",
+            "/api/account", "/api/profile");
 
     // Third-party analytics/telemetry domains (partial match)
     private static final Set<String> THIRD_PARTY_DOMAINS = Set.of(
@@ -55,6 +61,21 @@ public class StaticNoiseRules {
     // CORS preflight headers
     private static final String ACCESS_CONTROL_REQUEST_METHOD = "Access-Control-Request-Method";
     private static final String ACCESS_CONTROL_REQUEST_HEADERS = "Access-Control-Request-Headers";
+
+    /**
+     * Check if a path matches context-read patterns (e.g. /api/me, /api/user).
+     * These are not workflow steps but carry auth/user context for the ApplicationModel.
+     */
+    public static boolean isContextReadPath(String path) {
+        if (path == null) return false;
+        String lower = path.toLowerCase();
+        for (String cp : CONTEXT_READ_PATHS) {
+            if (lower.equals(cp) || lower.startsWith(cp + "/") || lower.startsWith(cp + "?")) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     /**
      * Check if a file path has a static asset extension.

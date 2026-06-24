@@ -129,6 +129,18 @@ public enum ValueKind {
         return this == BUSINESS_ID || this == SECURITY_TOKEN || this == MONEY || this == EMAIL;
     }
 
+    /**
+     * Whether this value kind represents a business-relevant value flow.
+     * Broader than correlation: includes USERNAME, STATUS, and UNKNOWN
+     * (which may carry domain-specific meaning), but excludes SESSION_TOKEN,
+     * BOOLEANISH, STATIC_CONFIG, and LOW_ENTROPY.
+     */
+    public boolean isBusinessValue() {
+        return this == BUSINESS_ID || this == SECURITY_TOKEN || this == MONEY
+                || this == EMAIL || this == USERNAME || this == STATUS
+                || this == UNKNOWN;
+    }
+
     private static final Set<String> BOOLEANISH_NAMES = Set.of(
             "active", "enabled", "disabled", "visible", "show", "hide",
             "required", "optional", "readonly", "read_only", "checked",

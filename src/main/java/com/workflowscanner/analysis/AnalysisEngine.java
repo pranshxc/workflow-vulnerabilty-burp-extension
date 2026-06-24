@@ -191,11 +191,13 @@ public class AnalysisEngine {
                             + "(threshold: " + analysisThreshold + ").");
 
             // 2. Build ApplicationModel from all candidates (including display-only)
+            // Pass full step lists to learn adjacency transitions
             for (WorkflowCandidate candidate : candidates) {
-                for (RequestNode step : candidate.getSteps()) {
-                    if (step != null) {
-                        applicationModel.learnFromCandidate(List.of(step));
-                    }
+                List<RequestNode> steps = candidate.getSteps().stream()
+                        .filter(s -> s != null)
+                        .collect(java.util.stream.Collectors.toList());
+                if (!steps.isEmpty()) {
+                    applicationModel.learnFromCandidate(steps);
                 }
             }
 
