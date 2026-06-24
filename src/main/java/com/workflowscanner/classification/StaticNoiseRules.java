@@ -44,11 +44,18 @@ public class StaticNoiseRules {
             "presence", "online", "typing", "sse", "websocket");
 
     // Context read paths — not workflow steps, not noise, retain for ApplicationModel
-    // These carry auth context (user_id, role, org, permissions) useful for LLM prompts
+    // These carry auth context (user_id, role, org, permissions) useful for LLM prompts.
+    //
+    // Narrowed: only paths that are virtually always safe GETs in modern APIs.
+    // Broad paths like /profile and /account can host real workflow actions
+    // (POST /profile, PATCH /api/profile, DELETE /account) — those must NOT be
+    // classified as context reads. Method-aware filtering happens in
+    // RequestClassifier via isContextReadPath(path, method).
     private static final Set<String> CONTEXT_READ_PATHS = Set.of(
-            "/api/me", "/api/user", "/api/v1/me", "/api/v1/user",
-            "/me", "/user", "/account", "/profile",
-            "/api/account", "/api/profile");
+            "/api/me", "/api/v1/me", "/api/v2/me",
+            "/api/current-user", "/api/current_user",
+            "/api/session", "/api/v1/session",
+            "/api/auth/me", "/api/auth/session");
 
     // Third-party analytics/telemetry domains (partial match)
     private static final Set<String> THIRD_PARTY_DOMAINS = Set.of(
@@ -75,6 +82,23 @@ public class StaticNoiseRules {
             }
         }
         return false;
+    }
+
+    /**
+     * Method-aware context read check.
+     * Only safe methods (GET/HEAD) are treated as context reads. POST/PUT/PATCH/DELETE
+     * to the same paths are real workflow actions and must NOT be suppressed.
+     *
+     * @param path   the request path
+     * @param method the HTTP method (case-insensitive). May be null, treated as GET.
+     * @return true only when both the path matches a context-read pattern AND
+     *         the method is a safe read.
+     */
+    public static boolean isContextReadPath(String path, String method) {
+        if (!isContextReadPath(path)) return false;
+        if (method == null) return true;
+        String m = method.trim().toUpperCase();
+        return "GET".equals(m) || "HEAD".equals(m);
     }
 
     /**

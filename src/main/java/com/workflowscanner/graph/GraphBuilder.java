@@ -314,7 +314,7 @@ public class GraphBuilder {
             File dir = new File(directoryPath);
             if (!dir.exists()) dir.mkdirs();
 
-            // Save nodes (without transient CapturedRequest)
+            // Save nodes (including raw HTTP data for replay)
             List<NodeData> nodeDataList = new ArrayList<>();
             for (RequestNode node : graph.getNodes().values()) {
                 NodeData nd = new NodeData();
@@ -331,6 +331,21 @@ public class GraphBuilder {
                 nd.responseData = node.getResponseData();
                 nd.classification = node.getClassification();
                 nd.endpointKey = node.getEndpointKey();
+                // Persist raw HTTP data so loaded nodes can be replayed
+                // (View Request/Response, Send to Repeater, validation).
+                CapturedRequest req = node.getRequest();
+                if (req != null) {
+                    nd.source = req.getSource() != null ? req.getSource().name() : null;
+                    nd.queryParams = req.getQueryParams();
+                    nd.requestHeaders = req.getRequestHeaders();
+                    nd.requestBody = req.getRequestBody();
+                    nd.responseHeaders = req.getResponseHeaders();
+                    nd.responseBody = req.getResponseBody();
+                    nd.mimeType = req.getMimeType();
+                    nd.referrer = req.getReferrer();
+                    nd.contentType = req.getContentType();
+                    nd.cookies = req.getCookies();
+                }
                 nodeDataList.add(nd);
             }
 
@@ -388,6 +403,11 @@ public class GraphBuilder {
                     if (nd.responseData != null) node.setResponseData(nd.responseData);
                     if (nd.classification != null) node.setClassification(nd.classification);
                     if (nd.endpointKey != null) node.setEndpointKey(nd.endpointKey);
+                    // Restore raw HTTP data so the node is fully replayable
+                    // (View Request/Response, Send to Repeater, validation).
+                    if (nd.url != null || nd.requestHeaders != null || nd.requestBody != null) {
+                        node.setRequest(rebuildCapturedRequest(nd));
+                    }
                     graph.addNode(node);
                 }
             }
@@ -454,6 +474,15 @@ public class GraphBuilder {
     /**
      * Extract API endpoint paths from JavaScript file content using regex.
      * Adds discovered endpoints to the ApplicationModel for LLM context.
+     *
+     * Supports:
+     * - Quoted paths: "/api/orders/123"
+     * - Backticks/template strings: `/api/orders/${id}`
+     * - Full URLs: "https://api.example.com/v1/payments"
+     * - Function call style: fetch("/api/..."), axios.get("/api/..."),
+     *   client.post("/api/..."), XMLHttpRequest("GET", "/api/...")
+     * - Method is taken from the surrounding function call when available;
+     *   it falls back to GET or path-keyword heuristic.
      */
     private void processJavaScriptForEndpoints(CapturedRequest request) {
         if (applicationModel == null) return;
@@ -465,24 +494,34 @@ public class GraphBuilder {
         }
 
         int before = applicationModel.getDiscoveredEndpoints().size();
+        String requestHost = request.getHost();
 
-        // Match API patterns commonly found in JS bundles
-        java.util.regex.Pattern apiPattern = java.util.regex.Pattern.compile(
-                "[\"'](/(?:api/|v\\d+/|graphql|rest/)[a-zA-Z0-9_/\\-{}]+)[\"']");
-        java.util.regex.Matcher matcher = apiPattern.matcher(body);
-        while (matcher.find()) {
-            String endpoint = matcher.group(1);
-            // Clean up path params like {id} -> :id for EndpointKey compatibility
-            String cleaned = endpoint.replaceAll("\\{([^}]+)\\}", ":$1");
-            String method = "GET"; // default; can refine
-            if (cleaned.contains("delete") || cleaned.contains("remove")) method = "DELETE";
-            if (cleaned.contains("create") || cleaned.contains("add") || cleaned.contains("post")) method = "POST";
-            if (cleaned.contains("update") || cleaned.contains("put") || cleaned.contains("edit")) method = "PUT";
+        // Quoted or backticked path starting with /api/ or /vN/ or /graphql or /rest/
+        java.util.regex.Pattern pathPattern = java.util.regex.Pattern.compile(
+                "[\"'`](/(?:api/|v\\d+/|graphql|rest/)[a-zA-Z0-9_/\\-{}:$]+)[\"'`]");
+        java.util.regex.Matcher pathMatcher = pathPattern.matcher(body);
+        while (pathMatcher.find()) {
+            int start = pathMatcher.start();
+            String raw = pathMatcher.group(1);
+            String method = inferMethodNear(body, start, "GET");
+            addDiscoveredEndpoint(raw, method, requestHost);
+        }
 
-            // Use normalized form as both host and path since we don't have host context from JS
-            applicationModel.addEndpoint(
-                    new com.workflowscanner.classification.EndpointKey(
-                            method, "js-discovery", cleaned, java.util.Set.of()));
+        // Full absolute URLs in strings: "https://api.example.com/v1/payments"
+        java.util.regex.Pattern urlPattern = java.util.regex.Pattern.compile(
+                "[\"'`](https?://[a-zA-Z0-9.\\-]+(?:/[a-zA-Z0-9_/\\-{}:$]+))[\"'`]");
+        java.util.regex.Matcher urlMatcher = urlPattern.matcher(body);
+        while (urlMatcher.find()) {
+            int start = urlMatcher.start();
+            String fullUrl = urlMatcher.group(1);
+            String method = inferMethodNear(body, start, "GET");
+            // Split host and path
+            int schemeEnd = fullUrl.indexOf("://") + 3;
+            int pathStart = fullUrl.indexOf('/', schemeEnd);
+            if (pathStart < 0) continue;
+            String host = fullUrl.substring(0, pathStart);
+            String path = fullUrl.substring(pathStart);
+            addDiscoveredEndpoint(path, method, host);
         }
 
         int added = applicationModel.getDiscoveredEndpoints().size() - before;
@@ -490,6 +529,66 @@ public class GraphBuilder {
             logger.log(LogCategory.GRAPH, LogLevel.INFO, "GraphBuilder",
                     "Discovered " + added + " API endpoints from JS: " + request.getPath());
         }
+    }
+
+    /**
+     * Add a discovered endpoint to the ApplicationModel with host/hostHint handling.
+     * Falls back to "js-discovery" when no host context is available.
+     */
+    private void addDiscoveredEndpoint(String path, String method, String hostHint) {
+        if (path == null) return;
+        // Clean up template-style placeholders: ${id} -> :id, {id} -> :id
+        String cleaned = path.replaceAll("\\$\\{[^}]+}", ":param")
+                .replaceAll("\\{([^}]+)\\}", ":$1");
+        if (cleaned.isEmpty()) return;
+
+        String host = (hostHint != null && !hostHint.isEmpty()) ? hostHint : "js-discovery";
+        applicationModel.addEndpoint(
+                new com.workflowscanner.classification.EndpointKey(
+                        method, host, cleaned, java.util.Set.of()));
+    }
+
+    /**
+     * Look at the ~120 chars before a path match and try to identify an HTTP
+     * method from a surrounding call: fetch(..., {method:"POST"}),
+     * axios.post(...), client.get(...), $http.put(...), XMLHttpRequest open.
+     * Falls back to path-keyword heuristic or the supplied default.
+     */
+    private String inferMethodNear(String body, int matchStart, String defaultMethod) {
+        int lookbackStart = Math.max(0, matchStart - 200);
+        String context = body.substring(lookbackStart, matchStart);
+
+        // Explicit method: { method: "POST" } or {method:'PUT'}
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile(
+                "method\\s*[:=]\\s*[\"']([A-Z]+)[\"']",
+                java.util.regex.Pattern.CASE_INSENSITIVE).matcher(context);
+        if (m.find()) {
+            String found = m.group(1).toUpperCase();
+            if (isHttpMethod(found)) return found;
+        }
+
+        // axios.{verb}(...), client.{verb}(...), ${prefix}.{verb}(...)
+        m = java.util.regex.Pattern.compile(
+                "(?:^|[^.$a-zA-Z])(?:axios|client|api|http|\\$http|this\\.[\\w$]+)\\.([a-z]+)\\s*\\(",
+                java.util.regex.Pattern.CASE_INSENSITIVE).matcher(context);
+        if (m.find()) {
+            String verb = m.group(1).toUpperCase();
+            if (isHttpMethod(verb)) return verb;
+        }
+
+        // Path-keyword heuristic as a last resort
+        String path = body.substring(matchStart, Math.min(body.length(), matchStart + 120));
+        if (path.contains("delete") || path.contains("remove")) return "DELETE";
+        if (path.contains("update") || path.contains("edit") || path.contains("/put/")) return "PUT";
+        if (path.contains("create") || path.contains("/add") || path.contains("/post/")) return "POST";
+
+        return defaultMethod;
+    }
+
+    private static boolean isHttpMethod(String s) {
+        return "GET".equals(s) || "POST".equals(s) || "PUT".equals(s)
+                || "DELETE".equals(s) || "PATCH".equals(s) || "HEAD".equals(s)
+                || "OPTIONS".equals(s);
     }
     public long getBusinessActionCount() { return businessActionCount.get(); }
     public long getBusinessReadCount() { return businessReadCount.get(); }
@@ -513,5 +612,50 @@ public class GraphBuilder {
         Map<String, Object> responseData;
         RequestClassification classification;
         EndpointKey endpointKey;
+
+        // Raw HTTP fields (persisted for replay; nullable when absent)
+        String source;
+        Map<String, String> queryParams;
+        Map<String, List<String>> requestHeaders;
+        String requestBody;
+        Map<String, List<String>> responseHeaders;
+        String responseBody;
+        String mimeType;
+        String referrer;
+        String contentType;
+        List<String> cookies;
+    }
+
+    /**
+     * Rebuild a CapturedRequest from persisted NodeData so loaded nodes
+     * retain full replay capability (View Request, Send to Repeater, validation).
+     */
+    private static CapturedRequest rebuildCapturedRequest(NodeData nd) {
+        CapturedRequest req = new CapturedRequest();
+        if (nd.id != null) req.setId(nd.id);
+        req.setTimestamp(nd.timestamp);
+        req.setMethod(nd.method);
+        req.setUrl(nd.url);
+        req.setHost(nd.host);
+        req.setPath(nd.path);
+        if (nd.queryParams != null) req.setQueryParams(nd.queryParams);
+        if (nd.requestHeaders != null) req.setRequestHeaders(nd.requestHeaders);
+        req.setRequestBody(nd.requestBody);
+        req.setStatusCode(nd.statusCode);
+        if (nd.responseHeaders != null) req.setResponseHeaders(nd.responseHeaders);
+        req.setResponseBody(nd.responseBody);
+        req.setMimeType(nd.mimeType);
+        req.setReferrer(nd.referrer);
+        req.setContentType(nd.contentType);
+        if (nd.cookies != null) req.setCookies(nd.cookies);
+        if (nd.groupId != null) req.setGroupId(nd.groupId);
+        if (nd.source != null) {
+            try {
+                req.setSource(CapturedRequest.Source.valueOf(nd.source));
+            } catch (IllegalArgumentException ignored) {
+                // Unknown source value from older build — leave default.
+            }
+        }
+        return req;
     }
 }

@@ -288,7 +288,23 @@ public class WorkflowSessionizer {
 
     /**
      * Extract auth cookies/headers and return a SHA-256 hash.
-     * If no auth is found, use source IP as fallback identity.
+     * <p>
+     * Identity resolution order (most reliable first):
+     * <ol>
+     *   <li>Auth cookies: JSESSIONID, PHPSESSID, session, sid, auth, etc.</li>
+     *   <li>Authorization: Bearer header</li>
+     *   <li>X-Auth-Token header</li>
+     *   <li>Other Bearer-style auth headers (e.g. X-API-Key when used as identity)</li>
+     *   <li>Top-level navigation: referrer path family (groups unauthenticated
+     *       page visits by where they came from)</li>
+     *   <li>Anonymous bucket (empty string) — NOT X-Forwarded-For, which is
+     *       spoofable and often absent on Burp proxy traffic</li>
+     * </ol>
+     * X-Forwarded-For is intentionally NOT used as identity because it is
+     * trivially client-controlled and frequently missing from proxy traffic.
+     * Returning an empty string groups requests as anonymous; the WorkflowDetector
+     * still uses the (host, referrerFamily) tuple of the SessionKey to split
+     * traffic into sensible candidates.
      */
     private static String extractAuthCookieHash(RequestNode node) {
         if (node.getRequest() == null) return "";
@@ -323,15 +339,18 @@ public class WorkflowSessionizer {
             authValues.append("X-Auth-Token=").append(xAuthHeaders.get(0));
         }
 
-        // No auth found — try source IP as fallback identity
+        // X-API-Key as identity when present (some APIs use it as a session substitute)
+        List<String> xApiKey = node.getRequest().getRequestHeaders().get("X-API-Key");
+        if (xApiKey != null && !xApiKey.isEmpty()) {
+            if (authValues.length() > 0) authValues.append("|");
+            authValues.append("X-API-Key=").append(xApiKey.get(0));
+        }
+
         if (authValues.length() == 0) {
-            List<String> xForwardedFor = node.getRequest().getRequestHeaders().get("X-Forwarded-For");
-            if (xForwardedFor != null && !xForwardedFor.isEmpty()) {
-                authValues.append("src_ip=").append(xForwardedFor.get(0).split(",")[0].trim());
-            } else {
-                // Truly anonymous — return empty string
-                return "";
-            }
+            // Anonymous — caller can still split by host + referrer family.
+            // Intentionally do NOT use X-Forwarded-For as identity; it is
+            // spoofable and unreliable on Burp proxy traffic.
+            return "";
         }
 
         return sha256(authValues.toString());

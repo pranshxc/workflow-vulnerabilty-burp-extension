@@ -35,7 +35,8 @@ public class WorkflowBoundaryDetector {
             if (path.contains("cart") || path.contains("checkout")) return true;
             if (path.contains("reset") && path.contains("password")) return true;
             if (path.contains("settings") || path.contains("profile")) return true;
-            if (path.contains("create") || path.contains("new") && !path.contains("notification"))
+            if ((path.contains("create") || path.contains("new"))
+                    && !path.contains("notification"))
                 return true;
             if (path.endsWith("/new") || path.contains("/new/")) return true;
         }

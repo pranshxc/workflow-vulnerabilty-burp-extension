@@ -90,10 +90,18 @@ public class RelationshipDetector {
                 if (target != null && isBusinessRelevant(target)) return EdgeStrength.MEDIUM;
                 return EdgeStrength.WEAK;
             case RESPONSE_CORRELATION:
-                // Business token correlation = MEDIUM, cookie correlation = CONTEXT_ONLY
-                if (edge.getEvidence() != null && edge.getEvidence().contains("Set-Cookie")) {
+                // Strength is determined by the cookie's semantic value, not the
+                // presence of the literal "Set-Cookie" string in the evidence
+                // (which was always present and so always downgraded).
+                if (edge.getValueKind() == ValueKind.SESSION_TOKEN) {
                     return EdgeStrength.CONTEXT_ONLY;
                 }
+                if (edge.isBusinessValueFlow()) {
+                    return EdgeStrength.MEDIUM;
+                }
+                // Workflow-state cookies (cart_id, checkout_session, etc.)
+                // with UNKNOWN or other non-session value kinds still represent
+                // a meaningful relationship — keep them at MEDIUM.
                 return EdgeStrength.MEDIUM;
             case TIME_WINDOW:
                 return EdgeStrength.WEAK;
@@ -263,11 +271,18 @@ public class RelationshipDetector {
 
                 Object setCookieValue = existing.getResponseData().get("set-cookie." + cookieName);
                 if (setCookieValue != null && setCookieValue.toString().equals(cookieValue)) {
-                    edges.add(new RequestEdge(
+                    RequestEdge edge = new RequestEdge(
                             existing.getId(), newNode.getId(),
                             EdgeType.RESPONSE_CORRELATION, 0.85,
                             "Set-Cookie '" + cookieName + "' from Node#" + existing.getNodeIndex()
-                                    + " used as Cookie in Node#" + newNode.getNodeIndex()));
+                                    + " used as Cookie in Node#" + newNode.getNodeIndex());
+                    // Populate value semantics so getEdgeStrength() can decide
+                    // between CONTEXT_ONLY and MEDIUM based on the cookie's
+                    // semantic kind (session vs business/flow).
+                    edge.setParamName(cookieName);
+                    edge.setValueHash(sha256(cookieValue));
+                    edge.setValueKind(ValueKind.classify(cookieName, cookieValue));
+                    edges.add(edge);
                 }
             }
         }

@@ -78,8 +78,11 @@ public class RequestClassifier {
         }
 
         // Priority 7: Auth context reads (e.g. /api/me)
-        // These are not workflow steps but carry user context for the ApplicationModel
-        if (StaticNoiseRules.isContextReadPath(path)) {
+        // These are not workflow steps but carry user context for the ApplicationModel.
+        // Method-aware: only safe GET/HEAD are treated as context reads.
+        // POST/PUT/PATCH/DELETE on these paths are real workflow actions and must
+        // fall through to the business keyword classifier below.
+        if (StaticNoiseRules.isContextReadPath(path, method)) {
             if (StaticNoiseRules.isJsonResponse(mimeType)) {
                 return RequestClassification.background(RequestIntent.CONTEXT_READ,
                         "Auth context read (retained for ApplicationModel)");

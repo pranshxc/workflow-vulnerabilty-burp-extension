@@ -100,37 +100,42 @@ public class WorkflowVulnScanner implements BurpExtension {
         // 5. Request pipeline + backfill service
         initRequestPipeline();
 
-        // 6. Start graph builder (pipeline -> graph)
+        // 6. Application model — created BEFORE the graph builder starts so
+        //    that any traffic arriving during the startup gap is not silently
+        //    dropped (context reads, JS-discovered endpoints).
+        initApplicationModel();
+
+        // 7. Start graph builder (pipeline -> graph)
         startGraphBuilder();
 
-        // 7. LLM client
+        // 8. LLM client
         initLLMClient();
 
-        // 8. Analysis engine
+        // 9. Analysis engine (wires workflowDetector into graph + analysisEngine)
         initAnalysisEngine();
 
-        // 9. Validation engine
+        // 10. Validation engine
         initValidationEngine();
 
-        // 10. Advisory manager
+        // 11. Advisory manager
         initAdvisoryManager();
 
-        // 11. Wire the full pipeline via event bus
+        // 12. Wire the full pipeline via event bus
         wirePipeline();
 
-        // 12. UI panels
+        // 13. UI panels
         initUI();
 
-        // 13. HTTP handler (live proxy traffic)
+        // 14. HTTP handler (live proxy traffic)
         initHttpHandler();
 
-        // 14. Context menu
+        // 15. Context menu
         initContextMenu();
 
-        // 15. Health check
+        // 16. Health check
         initHealthCheck();
 
-        // 16. Register unload handler
+        // 17. Register unload handler
         api.extension().registerUnloadingHandler(new ShutdownHandler());
 
         logger.log(LogCategory.EXTENSION, LogLevel.INFO, "WorkflowVulnScanner",
@@ -257,20 +262,43 @@ public class WorkflowVulnScanner implements BurpExtension {
         }
     }
 
-    private void initAnalysisEngine() {
+    private void initApplicationModel() {
         try {
             this.applicationModel = new ApplicationModel();
+            // Wire the ApplicationModel into the graph builder BEFORE it starts
+            // consuming traffic, so context reads and JS-discovered endpoints
+            // are not dropped during the startup gap.
+            if (graphBuilder != null) {
+                graphBuilder.setApplicationModel(applicationModel);
+            }
+            logger.log(LogCategory.EXTENSION, LogLevel.INFO, "WorkflowVulnScanner",
+                    "Application model initialized (wired to graphBuilder before start).");
+        } catch (Exception e) {
+            logger.log(LogCategory.ERROR, LogLevel.ERROR, "WorkflowVulnScanner",
+                    "Failed to initialize application model.", e);
+            this.applicationModel = new ApplicationModel();
+        }
+    }
+
+    private void initAnalysisEngine() {
+        try {
+            // applicationModel was created in initApplicationModel(); use the
+            // existing instance, do not overwrite.
             this.workflowDetector = new WorkflowDetector(config, logger);
-            
+
             // Set graph context for edge-aware detection
             if (graphBuilder != null && graphBuilder.getDetector() != null) {
                 workflowDetector.setGraphContext(graph, graphBuilder.getDetector());
             }
-            
+
             this.analysisEngine = new AnalysisEngine(graph, llmClient, config, logger);
             analysisEngine.setWorkflowDetector(workflowDetector);
-            analysisEngine.setApplicationModel(applicationModel);
-            if (graphBuilder != null) {
+            if (applicationModel != null) {
+                analysisEngine.setApplicationModel(applicationModel);
+            }
+            // applicationModel is already wired into graphBuilder from
+            // initApplicationModel(); only set if missing (defensive).
+            if (graphBuilder != null && applicationModel != null) {
                 graphBuilder.setApplicationModel(applicationModel);
             }
 
@@ -503,10 +531,21 @@ public class WorkflowVulnScanner implements BurpExtension {
             // 7. Clear event bus
             shutdown("EventBus", () -> { if (eventBus != null) eventBus.clear(); });
 
-            // 8. Save configuration
+            // 8. Shutdown auto-analysis scheduler (prevents daemon thread leak)
+            shutdown("AutoAnalysisScheduler", () -> {
+                if (pendingAutoAnalysis != null) {
+                    pendingAutoAnalysis.cancel(false);
+                    pendingAutoAnalysis = null;
+                }
+                if (autoAnalysisScheduler != null) {
+                    autoAnalysisScheduler.shutdownNow();
+                }
+            });
+
+            // 9. Save configuration
             shutdown("Config", () -> { if (config != null) config.save(api); });
 
-            // 9. Flush and shutdown logs (last)
+            // 10. Flush and shutdown logs (last)
             if (logger != null) {
                 try {
                     logger.flush();

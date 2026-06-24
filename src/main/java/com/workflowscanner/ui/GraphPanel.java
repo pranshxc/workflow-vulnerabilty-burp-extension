@@ -220,9 +220,11 @@ public class GraphPanel extends JPanel {
             if (!lastResults.isEmpty()) {
                 candidates = lastResults;
             } else {
-                // Preview candidates without scoring or side effects
+                // Preview candidates with scoring so the display-threshold filter
+                // works even before the full detection pipeline has run.
+                // previewCandidates(score=true) does NOT mutate lastResults or fire listeners.
                 candidates = workflowDetector.previewCandidates(
-                        new ArrayList<>(graph.getNodes().values()));
+                        new ArrayList<>(graph.getNodes().values()), true);
             }
             // Filter to display-worthy candidates only
             candidates = candidates.stream()

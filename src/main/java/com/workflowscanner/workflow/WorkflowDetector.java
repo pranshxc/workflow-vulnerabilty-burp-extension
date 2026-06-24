@@ -54,11 +54,18 @@ public class WorkflowDetector {
     }
     
     /**
-     * Read-only preview of candidates — no scoring, no listener publishing, no side effects.
+     * Read-only preview of candidates — optionally scored, no listener publishing,
+     * no lastResults mutation, no side effects beyond the candidate's own score field.
      * Safe to call from UI refresh thread.
-     * Returns candidates segmented by session (not merged), in chronological order.
+     *
+     * @param allNodes all graph nodes
+     * @param score    if true, runs the scorer on each candidate so the UI can
+     *                 apply its display threshold (default true). The score is
+     *                 written to the candidate's workflowScore but lastResults
+     *                 and candidate listeners are NOT touched.
+     * @return candidates segmented by session (not merged), in chronological order
      */
-    public List<WorkflowCandidate> previewCandidates(List<RequestNode> allNodes) {
+    public List<WorkflowCandidate> previewCandidates(List<RequestNode> allNodes, boolean score) {
         if (allNodes == null || allNodes.isEmpty()) return List.of();
 
         // Filter to workflow-relevant
@@ -75,7 +82,24 @@ public class WorkflowDetector {
 
         // Chronological order
         candidates.sort(Comparator.comparingLong(WorkflowCandidate::getStartTime));
+
+        if (score) {
+            for (WorkflowCandidate c : candidates) {
+                c.setWorkflowScore(scorer.score(c));
+            }
+            scorer.prioritize(candidates);
+        }
+
         return candidates;
+    }
+
+    /**
+     * Backwards-compatible preview: returns segmented candidates without scoring.
+     * Prefer {@link #previewCandidates(List, boolean)} with score=true for UI
+     * display that filters by score threshold.
+     */
+    public List<WorkflowCandidate> previewCandidates(List<RequestNode> allNodes) {
+        return previewCandidates(allNodes, false);
     }
 
     /**
