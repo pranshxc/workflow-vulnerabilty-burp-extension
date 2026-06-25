@@ -11,6 +11,7 @@ import com.workflowscanner.graph.GraphBuilder;
 import com.workflowscanner.graph.RequestGraph;
 import com.workflowscanner.llm.LLMClient;
 import com.workflowscanner.logging.ExtensionLogger;
+import com.workflowscanner.store.RequestStore;
 import com.workflowscanner.workflow.WorkflowDetector;
 
 import javax.swing.*;
@@ -94,6 +95,20 @@ public class MainTabPanel {
             if (c instanceof GraphPanel) {
                 ((GraphPanel) c).setWorkflowDetector(detector);
                 ((GraphPanel) c).setConfig(config);
+            }
+        }
+    }
+
+    /**
+     * Wire the disk-backed request store into all GraphPanels so
+     * View Request/Response and Send to Repeater can re-hydrate
+     * raw HTTP for backfilled nodes.
+     */
+    public void setRequestStore(RequestStore store) {
+        for (int i = 0; i < tabbedPane.getTabCount(); i++) {
+            Component c = tabbedPane.getComponentAt(i);
+            if (c instanceof GraphPanel) {
+                ((GraphPanel) c).setRequestStore(store);
             }
         }
     }

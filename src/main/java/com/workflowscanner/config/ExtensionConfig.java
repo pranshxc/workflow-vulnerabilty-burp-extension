@@ -55,6 +55,19 @@ public class ExtensionConfig {
     // --- Request Pipeline ---
     private int pipelineQueueCapacity = 5000;
 
+    // --- Hot Graph Memory Budget ---
+    // Number of workflow-relevant nodes kept in the in-memory
+    // RequestGraph before eviction kicks in. The full dataset
+    // lives in RequestStore; the hot graph is a working view.
+    private int hotGraphNodeLimit = 100_000;
+    // Number of nodes in the hot graph that still keep their raw
+    // HTTP payload. Past this, the raw payload is dropped and
+    // reloaded on demand from RequestStore.
+    private int hotRawRetention = 5_000;
+    // Max number of recent node IDs per key in the bounded
+    // relationship-detection indexes.
+    private int indexMaxPerKey = 50;
+
     // --- Constructors ---
 
     public ExtensionConfig() {
@@ -132,6 +145,9 @@ public class ExtensionConfig {
         this.fileLoggingEnabled = defaults.fileLoggingEnabled;
         this.logFileDirectory = defaults.logFileDirectory;
         this.pipelineQueueCapacity = defaults.pipelineQueueCapacity;
+        this.hotGraphNodeLimit = defaults.hotGraphNodeLimit;
+        this.hotRawRetention = defaults.hotRawRetention;
+        this.indexMaxPerKey = defaults.indexMaxPerKey;
     }
 
     // --- Getters and Setters ---
@@ -208,4 +224,13 @@ public class ExtensionConfig {
 
     public int getPipelineQueueCapacity() { return pipelineQueueCapacity; }
     public void setPipelineQueueCapacity(int pipelineQueueCapacity) { this.pipelineQueueCapacity = pipelineQueueCapacity; }
+
+    public int getHotGraphNodeLimit() { return hotGraphNodeLimit; }
+    public void setHotGraphNodeLimit(int hotGraphNodeLimit) { this.hotGraphNodeLimit = hotGraphNodeLimit; }
+
+    public int getHotRawRetention() { return hotRawRetention; }
+    public void setHotRawRetention(int hotRawRetention) { this.hotRawRetention = hotRawRetention; }
+
+    public int getIndexMaxPerKey() { return indexMaxPerKey; }
+    public void setIndexMaxPerKey(int indexMaxPerKey) { this.indexMaxPerKey = indexMaxPerKey; }
 }

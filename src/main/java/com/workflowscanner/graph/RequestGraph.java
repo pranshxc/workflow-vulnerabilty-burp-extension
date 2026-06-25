@@ -117,6 +117,91 @@ public class RequestGraph {
     }
 
     /**
+     * Evict nodes from the hot working view when the in-memory
+     * node count exceeds the budget. The eviction policy keeps
+     * recent and connected nodes and drops the oldest isolated
+     * nodes first. Evicted nodes are not destroyed in the store;
+     * they remain canonical on disk and can be re-hydrated by id
+     * via {@code RequestStore.getSummary(id)} / {@code getRaw(id)}.
+     *
+     * <p>Returns the ids that were actually evicted so the caller
+     * can update external indexes. The adjacency queues for the
+     * evicted ids are dropped; existing edges to / from the
+     * evicted node are left in {@link #edges} for forensic
+     * purposes but the adjacency maps stop pointing at them.
+     *
+     * @param protectedNodeIds ids that must not be evicted (active
+     *                         candidates, UI-selected, validation
+     *                         targets). May be null or empty.
+     * @param budget           maximum number of nodes to keep
+     *                         after eviction.
+     */
+    public List<String> evictToBudget(Set<String> protectedNodeIds, int budget) {
+        if (budget <= 0) return List.of();
+        int current = nodes.size();
+        if (current <= budget) return List.of();
+        int toEvict = current - budget;
+        // Build the eviction candidate list: oldest isolated nodes
+        // first, then oldest connected, then oldest overall. We
+        // never evict a protected id.
+        Set<String> protectedSet = protectedNodeIds != null
+                ? protectedNodeIds : Set.of();
+        List<RequestNode> all = new ArrayList<>(nodes.values());
+        all.sort(Comparator.comparingLong(RequestNode::getTimestamp));
+        // Partition: isolated first (no incoming AND no outgoing
+        // adjacency entries), then connected.
+        List<RequestNode> isolated = new ArrayList<>();
+        List<RequestNode> connected = new ArrayList<>();
+        for (RequestNode n : all) {
+            if (protectedSet.contains(n.getId())) continue;
+            Queue<String> out = outgoing.get(n.getId());
+            Queue<String> in = incoming.get(n.getId());
+            boolean hasAdj = (out != null && !out.isEmpty())
+                    || (in != null && !in.isEmpty());
+            if (hasAdj) connected.add(n); else isolated.add(n);
+        }
+        List<String> evicted = new ArrayList<>(toEvict);
+        for (RequestNode n : isolated) {
+            if (evicted.size() >= toEvict) break;
+            if (removeNodeInternal(n.getId())) evicted.add(n.getId());
+        }
+        if (evicted.size() < toEvict) {
+            for (RequestNode n : connected) {
+                if (evicted.size() >= toEvict) break;
+                if (removeNodeInternal(n.getId())) evicted.add(n.getId());
+            }
+        }
+        if (!evicted.isEmpty()) graphVersion++;
+        return evicted;
+    }
+
+    /**
+     * Remove a single node from the hot graph. Idempotent.
+     * Maintains the workflow-relevant counter and the adjacency
+     * queues. Returns true if the node was present and removed.
+     */
+    private boolean removeNodeInternal(String nodeId) {
+        RequestNode removed = nodes.remove(nodeId);
+        if (removed == null) return false;
+        if (removed.getClassification() != null
+                && removed.getClassification().isWorkflowRelevant()) {
+            workflowRelevantNodeCount.decrementAndGet();
+        }
+        outgoing.remove(nodeId);
+        incoming.remove(nodeId);
+        // Drop the node's id from any adjacency queue that points
+        // at it. We do not remove the edges themselves; they remain
+        // in the queue for the chain detection code.
+        for (Queue<String> targets : outgoing.values()) {
+            targets.remove(nodeId);
+        }
+        for (Queue<String> sources : incoming.values()) {
+            sources.remove(nodeId);
+        }
+        return true;
+    }
+
+    /**
      * Live edges. Backed by a {@link ConcurrentLinkedQueue} so
      * backfill does not pay array-copy cost. Returns a
      * {@code Collection} (not {@code List}) because the underlying

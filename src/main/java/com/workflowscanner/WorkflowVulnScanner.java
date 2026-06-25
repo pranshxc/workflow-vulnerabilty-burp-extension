@@ -333,6 +333,9 @@ public class WorkflowVulnScanner implements BurpExtension {
             if (applicationModel != null) {
                 analysisEngine.setApplicationModel(applicationModel);
             }
+            if (requestStore != null) {
+                analysisEngine.setRequestStore(requestStore);
+            }
             // applicationModel is already wired into graphBuilder from
             // initApplicationModel(); only set if missing (defensive).
             if (graphBuilder != null && applicationModel != null) {
@@ -360,6 +363,13 @@ public class WorkflowVulnScanner implements BurpExtension {
             if (workflowDetector != null) {
                 validationEngine.setMetricsSink(workflowDetector);
             }
+            // Wire the request store so the validator (and the
+            // replayer it owns) can re-hydrate raw HTTP for
+            // backfilled candidates whose payload has been
+            // dropped from the hot graph.
+            if (requestStore != null) {
+                validationEngine.setRequestStore(requestStore);
+            }
             logger.log(LogCategory.EXTENSION, LogLevel.INFO, "WorkflowVulnScanner",
                     "Validation engine initialized.");
         } catch (Exception e) {
@@ -371,6 +381,9 @@ public class WorkflowVulnScanner implements BurpExtension {
     private void initAdvisoryManager() {
         try {
             this.advisoryManager = new AdvisoryManager(api, logger);
+            if (requestStore != null) {
+                advisoryManager.setRequestStore(requestStore);
+            }
             logger.log(LogCategory.EXTENSION, LogLevel.INFO, "WorkflowVulnScanner",
                     "Advisory manager initialized.");
         } catch (Exception e) {
@@ -471,7 +484,13 @@ public class WorkflowVulnScanner implements BurpExtension {
             if (mainTabPanel != null && workflowDetector != null) {
                 mainTabPanel.setWorkflowDetector(workflowDetector, config);
             }
-            
+            // Wire the request store into the graph panel so the
+            // View Request/Response and Send to Repeater actions
+            // can re-hydrate raw HTTP for backfilled nodes.
+            if (mainTabPanel != null && requestStore != null) {
+                mainTabPanel.setRequestStore(requestStore);
+            }
+
             api.userInterface().registerSuiteTab(EXTENSION_NAME, mainTabPanel.getComponent());
             logger.log(LogCategory.EXTENSION, LogLevel.INFO, "WorkflowVulnScanner",
                     "UI panels registered with status bar.");

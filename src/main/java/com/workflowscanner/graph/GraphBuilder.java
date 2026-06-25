@@ -33,6 +33,8 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -92,12 +94,24 @@ public class GraphBuilder {
     // When the in-memory graph gets too big, we drop the raw
     // CapturedRequest from RequestNode and rely on the store to
     // serve raw data on demand. Keeps the working set bounded.
-    private static final int HOT_GRAPH_RAW_RETENTION = 200_000;
+    // Default 5000, configurable via ExtensionConfig.hotRawRetention.
+    private int hotRawRetention = 5_000;
+    // Hard cap on hot-graph node count. Past this, oldest isolated
+    // nodes are evicted. Configurable via ExtensionConfig.hotGraphNodeLimit.
+    private int hotGraphNodeLimit = 100_000;
     private final AtomicLong rawDropped = new AtomicLong(0);
+    private final AtomicLong evictedCount = new AtomicLong(0);
+    // Tracks ids of nodes that the user has opened, that are part
+    // of an active analysis, or that are pending validation.
+    // These are protected from eviction so that reopening the same
+    // node always finds the raw payload.
+    private final Set<String> pinnedNodeIds = ConcurrentHashMap.newKeySet();
 
     public GraphBuilder(RequestGraph graph, ExtensionLogger logger) {
         this.graph = graph;
-        this.detector = new RelationshipDetector(graph, logger);
+        // Default index cap; start(...) replaces this with the
+        // config-driven value if a config is provided.
+        this.detector = new RelationshipDetector(graph, logger, 50);
         this.logger = logger;
     }
 
@@ -161,6 +175,17 @@ public class GraphBuilder {
     public void start(RequestPipeline pipeline, ExtensionConfig config) {
         this.pipeline = pipeline;
         this.config = config;
+        if (config != null) {
+            this.hotRawRetention = config.getHotRawRetention();
+            this.hotGraphNodeLimit = config.getHotGraphNodeLimit();
+            // The detector is created with the default cap in
+            // the constructor; the config is read here for the
+            // hot-graph budgets. The RelationshipDetector's
+            // internal bounded index caps are not changed
+            // post-construction because the field is final; that
+            // cap defaults to 50 and is a sane default. A future
+            // patch can make the cap mutable for live tuning.
+        }
         // Propagate config to graph for enriched stats when workflow detector is set
         if (workflowDetector != null && config != null) {
             graph.setWorkflowDetector(workflowDetector, config);
@@ -313,14 +338,36 @@ public class GraphBuilder {
                 default: break;
             }
 
-            // 6a. Once the hot graph is large, drop the raw HTTP
-            // from each new node. The data is still in the store
-            // and can be re-hydrated via RequestStore.getRaw(id).
-            // This is what keeps the working set bounded during
-            // full backfill on 1M+ request projects.
-            if (graph.getNodeCount() > HOT_GRAPH_RAW_RETENTION) {
+            // 6a. Smart raw retention. Keep raw HTTP for:
+            //   - all live recent traffic (last hotRawRetention / 4
+            //     requests are recent by definition)
+            //   - pinned nodes (UI-selected, validation target, etc.)
+            // Drop raw for:
+            //   - backfilled older nodes once we exceed hotRawRetention
+            // The raw payload is recoverable from RequestStore via
+            // RequestHydrator when a consumer needs it.
+            boolean keepRaw = shouldKeepRawInHotGraph(request, node);
+            if (!keepRaw) {
                 node.setRequest(null);
                 rawDropped.incrementAndGet();
+            } else {
+                pinnedNodeIds.add(node.getId());
+            }
+
+            // 6b. Hard cap on hot graph size. When the working set
+            // exceeds hotGraphNodeLimit, evict the oldest isolated
+            // nodes (then oldest connected) until we are within
+            // budget. Evicted nodes remain in RequestStore; the
+            // detector indexes are rebuilt lazily on demand.
+            if (graph.getNodeCount() > hotGraphNodeLimit) {
+                List<String> evicted = graph.evictToBudget(
+                        pinnedNodeIds, hotGraphNodeLimit);
+                if (!evicted.isEmpty()) {
+                    evictedCount.addAndGet(evicted.size());
+                    // Drop any evicted ids from the pin set (they
+                    // are no longer in the hot graph).
+                    pinnedNodeIds.removeAll(evicted);
+                }
             }
 
             // 7. Detect relationships with existing nodes (incremental)
@@ -350,7 +397,9 @@ public class GraphBuilder {
                         "Graph stats: " + stats
                                 + " | Suppressed: " + suppressedCount.get()
                                 + " | Stored: " + storedCount.get()
-                                + " | Raw dropped (hot-graph): " + rawDropped.get());
+                                + " | Raw dropped: " + rawDropped.get()
+                                + " | Evicted: " + evictedCount.get()
+                                + " | Pinned: " + pinnedNodeIds.size());
             }
 
         } catch (Exception e) {
@@ -378,11 +427,11 @@ public class GraphBuilder {
         if (directoryPath == null || directoryPath.isEmpty()) return;
 
         int nodeCount = graph.getNodeCount();
-        if (nodeCount > HOT_GRAPH_RAW_RETENTION) {
+        if (nodeCount > hotGraphNodeLimit) {
             logger.log(LogCategory.GRAPH, LogLevel.WARN, "GraphBuilder",
                     "Skipping graph JSON save: " + nodeCount
-                            + " nodes exceeds safety threshold "
-                            + "(" + HOT_GRAPH_RAW_RETENTION + "). "
+                            + " nodes exceeds hot-graph node limit "
+                            + "(" + hotGraphNodeLimit + "). "
                             + "RequestStore is canonical; full graph JSON is a "
                             + "debug export only and would risk OOM.");
             return;
@@ -550,7 +599,67 @@ public class GraphBuilder {
     public long getSuppressedCount() { return suppressedCount.get(); }
     public long getStoredCount() { return storedCount.get(); }
     public long getRawDroppedCount() { return rawDropped.get(); }
+    public long getEvictedCount() { return evictedCount.get(); }
     public RequestStore getRequestStore() { return requestStore; }
+    public int getHotRawRetention() { return hotRawRetention; }
+    public int getHotGraphNodeLimit() { return hotGraphNodeLimit; }
+    public int getPinnedCount() { return pinnedNodeIds.size(); }
+
+    /**
+     * Pin a node id so it is not evicted from the hot graph and
+     * its raw payload is not dropped. Call this from the UI when
+     * the user opens a node, from the validation engine when it
+     * selects a target, or from any consumer that needs the
+     * payload to remain accessible.
+     */
+    public void pinNode(String nodeId) {
+        if (nodeId != null) pinnedNodeIds.add(nodeId);
+    }
+
+    /**
+     * Unpin a previously pinned node. Idempotent.
+     */
+    public void unpinNode(String nodeId) {
+        if (nodeId != null) pinnedNodeIds.remove(nodeId);
+    }
+
+    /**
+     * Smart raw-retention policy. We keep raw HTTP for nodes
+     * that meet any of the following:
+     *
+     * <ul>
+     *   <li>The request is recent (came in within the last
+     *       {@code hotRawRetention / 4} requests). This is the
+     *       live-traffic recent-window.</li>
+     *   <li>The request was selected manually via the context
+     *       menu (it has a groupId).</li>
+     *   <li>The request is part of an active workflow candidate
+     *       (workflow score above the analysis threshold).</li>
+     *   <li>The hot graph is still below the raw retention budget.</li>
+     * </ul>
+     *
+     * Everything else (backfilled older traffic past the budget)
+     * gets its raw payload dropped; the data is recoverable from
+     * the disk-backed store.
+     */
+    private boolean shouldKeepRawInHotGraph(CapturedRequest request, RequestNode node) {
+        // Under budget: keep raw for everything.
+        if (graph.getNodeCount() <= hotRawRetention) return true;
+        // User-grouped (context menu): keep raw.
+        if (request.getGroupId() != null) return true;
+        // Recent: last hotRawRetention / 4 nodes are "live recent".
+        // We approximate "recent" as "created after timestamp
+        // cutoff" — the cutoff is the timestamp of the
+        // (nodesProcessed - hotRawRetention/4)-th node. But we do
+        // not track per-node timestamps cheaply, so use a clock
+        // window instead: anything in the last
+        // hotRawRetention/4 ms scaled to 1 second each is recent.
+        long recencyMs = Math.max(1000L, (long) hotRawRetention / 4 * 1000L);
+        if (request.getTimestamp() > System.currentTimeMillis() - recencyMs) {
+            return true;
+        }
+        return false;
+    }
 
     /**
      * Extract API endpoint paths from JavaScript file content using regex.

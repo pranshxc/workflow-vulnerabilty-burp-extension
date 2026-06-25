@@ -5,7 +5,11 @@ import com.workflowscanner.classification.RequestClassification;
 import com.workflowscanner.classification.RequestIntent;
 import com.workflowscanner.data.CapturedRequest;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -25,14 +29,25 @@ import java.util.Map;
  */
 public final class RequestStoreConversion {
 
+    // Same auth cookie names the WorkflowSessionizer uses, kept
+    // here so the store can derive a stable session identity
+    // without round-tripping through the in-memory graph.
+    private static final List<String> AUTH_COOKIE_NAMES = List.of(
+            "session", "sessionid", "sid", "phpsessid", "jsessionid",
+            "connect.sid", "_auth", "auth", "access_token", "refresh_token",
+            "rememberme", "remember_me", "xsrf-token", "x-csrf-token",
+            "__cfduid", "cfid", "cftoken");
+
     private RequestStoreConversion() {}
 
     /**
      * Build a {@link RequestSummary} from a captured request and its
-     * classification. The id is taken from the captured request; the
-     * timestamp, method, host, path, status, and workflow-relevance
-     * flag are copied directly. The intent, endpoint key, and
-     * session key are taken from the classification when present.
+     * classification. The id, timestamp, method, host, path, status,
+     * and workflow-relevance flag are copied directly. The intent
+     * and endpoint key are taken from the classification. The
+     * session key is derived here (host + auth-cookie-hash +
+     * referrer-family) so streaming consumers can group requests
+     * by session without re-parsing headers.
      */
     public static RequestSummary summaryOf(CapturedRequest request,
                                            RequestClassification classification) {
@@ -54,6 +69,7 @@ public final class RequestStoreConversion {
         if (classification != null && classification.getIntent() != null) {
             intentStr = classification.getIntent().name();
         }
+        String sessionKey = buildSessionKey(request);
         long size = approxSize(request);
         return new RequestSummary(
                 request.getId(),
@@ -65,7 +81,7 @@ public final class RequestStoreConversion {
                 relevant,
                 hasRaw,
                 endpointKeyStr,
-                null,                       // session key is filled in by the sessionizer, not here
+                sessionKey,
                 intentStr,
                 size);
     }
@@ -87,6 +103,94 @@ public final class RequestStoreConversion {
                 joinList(request.getCookies(), "; "),
                 joinQueryParams(request.getQueryParams()),
                 request.getReferrer());
+    }
+
+    /**
+     * Derive a compact session key. The key groups together
+     * requests from the same host with the same auth cookie hash
+     * and the same referrer family. This matches the
+     * {@code WorkflowSessionizer} grouping so the store-level
+     * session key is consistent with the in-memory one.
+     */
+    static String buildSessionKey(CapturedRequest request) {
+        if (request == null) return null;
+        String host = request.getHost() != null ? request.getHost().toLowerCase() : "";
+        String authHash = authCookieHash(request);
+        String referrerFamily = referrerFamily(request.getReferrer());
+        // Concatenate as "host|authHash|refFamily" so a streaming
+        // consumer can split or substring-search it.
+        return host + "|" + authHash + "|" + referrerFamily;
+    }
+
+    private static String authCookieHash(CapturedRequest request) {
+        Map<String, List<String>> headers = request.getRequestHeaders();
+        if (headers == null || headers.isEmpty()) return "";
+        // Parse Cookie header to a name->value map.
+        Map<String, String> cookies = new LinkedHashMap<>();
+        List<String> cookieH = headers.get("Cookie");
+        if (cookieH == null) cookieH = headers.get("cookie");
+        if (cookieH != null) {
+            for (String header : cookieH) {
+                if (header == null) continue;
+                for (String pair : header.split(";")) {
+                    int eq = pair.indexOf('=');
+                    if (eq < 0) continue;
+                    String name = pair.substring(0, eq).trim();
+                    String value = pair.substring(eq + 1).trim();
+                    if (!name.isEmpty()) cookies.put(name, value);
+                }
+            }
+        }
+        StringBuilder auth = new StringBuilder();
+        for (String name : AUTH_COOKIE_NAMES) {
+            String v = cookies.get(name);
+            if (v != null && !v.isEmpty()) {
+                if (auth.length() > 0) auth.append('|');
+                auth.append(name).append('=').append(v);
+            }
+        }
+        // Also include Authorization Bearer tokens and X-Auth-Token
+        // so APIs that use header-based auth still get a stable
+        // session key.
+        List<String> authH = headers.get("Authorization");
+        if (authH == null) authH = headers.get("authorization");
+        if (authH != null) {
+            for (String h : authH) {
+                if (h != null && h.startsWith("Bearer ")) {
+                    if (auth.length() > 0) auth.append('|');
+                    auth.append("Bearer=").append(h.substring(7));
+                }
+            }
+        }
+        List<String> xAuth = headers.get("X-Auth-Token");
+        if (xAuth == null) xAuth = headers.get("x-auth-token");
+        if (xAuth != null && !xAuth.isEmpty() && xAuth.get(0) != null) {
+            if (auth.length() > 0) auth.append('|');
+            auth.append("X-Auth-Token=").append(xAuth.get(0));
+        }
+        if (auth.length() == 0) return "";   // anonymous
+        return sha256Hex(auth.toString());
+    }
+
+    private static String referrerFamily(String referrer) {
+        if (referrer == null || referrer.isEmpty()) return "";
+        try {
+            java.net.URI uri = java.net.URI.create(referrer);
+            String path = uri.getRawPath();
+            if (path == null || path.isEmpty() || path.equals("/")) return "/";
+            String[] segments = path.split("/");
+            StringBuilder family = new StringBuilder();
+            int count = 0;
+            for (String seg : segments) {
+                if (!seg.isEmpty()) {
+                    family.append('/').append(seg.toLowerCase());
+                    if (++count >= 3) break;
+                }
+            }
+            return family.toString();
+        } catch (IllegalArgumentException e) {
+            return "";
+        }
     }
 
     private static boolean hasAnyPayload(CapturedRequest r) {
@@ -146,14 +250,18 @@ public final class RequestStoreConversion {
         return sb.toString();
     }
 
-    /**
-     * Render an {@link EndpointKey} as a compact stable string. We use
-     * the same shape the classification layer already produces
-     * ({@code METHOD host/path}) so the store does not need its own
-     * schema for the endpoint identity.
-     */
     private static String endpointKeyToString(EndpointKey ek) {
         if (ek == null) return null;
         return ek.getMethod() + " " + ek.getHost() + ek.getNormalizedPath();
+    }
+
+    private static String sha256Hex(String input) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] hash = md.digest(input.getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(hash);
+        } catch (NoSuchAlgorithmException e) {
+            return Integer.toHexString(input.hashCode());
+        }
     }
 }

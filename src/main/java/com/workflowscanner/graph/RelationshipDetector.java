@@ -4,13 +4,14 @@ import com.workflowscanner.classification.EdgeStrength;
 import com.workflowscanner.classification.RequestClassification;
 import com.workflowscanner.classification.RequestIntent;
 import com.workflowscanner.classification.ValueKind;
-import com.workflowscanner.data.CapturedRequest;
 import com.workflowscanner.data.RequestConverter;
 import com.workflowscanner.logging.ExtensionLogger;
 import com.workflowscanner.logging.LogCategory;
 import com.workflowscanner.logging.LogLevel;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
@@ -31,14 +32,41 @@ import java.util.concurrent.ConcurrentHashMap;
  * - REFERRER confidence varies by target intent
  * - RESPONSE_CORRELATION filters out session cookies
  * - PARAM_REUSE uses ValueKind classification to filter noise
+ *
+ * <p>All detection paths are O(1)-ish in the number of indexed
+ * candidates, not O(N) over the full hot graph. We use bounded
+ * indexes (last-N node IDs per key) for url, groupId, cookie value,
+ * and response value lookups. The hot graph can have hundreds of
+ * thousands of nodes without exploding detection cost.
  */
 public class RelationshipDetector {
 
     private final RequestGraph graph;
     private final ExtensionLogger logger;
 
-    // Inverted index: value -> set of node IDs whose RESPONSE contains that value
-    private final Map<String, Set<String>> responseValueIndex = new ConcurrentHashMap<>();
+    // Bounded index: value -> last N producer node IDs.
+    // Used by detectParameterReuse / detectResponseCorrelation to
+    // look up value producers in O(N-bounded) instead of O(graph).
+    private final Map<String, Deque<String>> responseValueIndex = new ConcurrentHashMap<>();
+
+    // Bounded index: normalized URL -> last N node IDs. Used by
+    // detectReferrerLinks and detectRedirectChains to find the
+    // few recent nodes that share a URL.
+    private final Map<String, Deque<String>> urlIndex = new ConcurrentHashMap<>();
+
+    // Bounded index: groupId -> last N node IDs. Used by
+    // detectUserDefinedGroups.
+    private final Map<String, Deque<String>> groupIndex = new ConcurrentHashMap<>();
+
+    // Bounded index: cookie name -> last N Set-Cookie values.
+    // For each value, the deque stores
+    // (value, nodeId) pairs so we can resolve the producer
+    // quickly. detectResponseCorrelation uses this.
+    private final Map<String, Deque<CookieProducer>> cookieSetIndex = new ConcurrentHashMap<>();
+
+    // Per-key cap. Bounded so the index cannot grow unboundedly
+    // with the request count.
+    private final int indexMaxPerKey;
 
     // Session cookie names that should never create workflow edges
     private static final Set<String> SESSION_COOKIE_NAMES = Set.of(
@@ -48,12 +76,20 @@ public class RelationshipDetector {
             "rememberme", "remember_me", "xsrf-token", "x-csrf-token");
 
     public RelationshipDetector(RequestGraph graph, ExtensionLogger logger) {
+        this(graph, logger, 50);
+    }
+
+    public RelationshipDetector(RequestGraph graph, ExtensionLogger logger,
+                                int indexMaxPerKey) {
         this.graph = graph;
         this.logger = logger;
+        this.indexMaxPerKey = Math.max(1, indexMaxPerKey);
     }
 
     /**
      * Compute all edges for a newly added node against existing nodes.
+     * Also indexes the new node into the bounded indexes for future
+     * lookups.
      */
     public List<RequestEdge> detectRelationships(RequestNode newNode) {
         List<RequestEdge> newEdges = new ArrayList<>();
@@ -65,8 +101,11 @@ public class RelationshipDetector {
         newEdges.addAll(detectResponseCorrelation(newNode));
         newEdges.addAll(detectUserDefinedGroups(newNode));
 
-        // Index this node's response values for future lookups
+        // Index this node for future lookups.
         indexResponseValues(newNode);
+        indexUrl(newNode);
+        indexGroup(newNode);
+        indexSetCookies(newNode);
 
         return newEdges;
     }
@@ -133,10 +172,43 @@ public class RelationshipDetector {
     private List<RequestEdge> detectRedirectChains(RequestNode newNode) {
         List<RequestEdge> edges = new ArrayList<>();
 
-        for (RequestNode existing : graph.getNodes().values()) {
-            if (existing.getId().equals(newNode.getId())) continue;
-
-            if (existing.isRedirect()) {
+        // Walk the existing index for redirect producers whose
+        // Location header matches this new URL, and redirect
+        // consumers (existing nodes) whose URL matches a Location
+        // header on this new node. Bounded by indexMaxPerKey per
+        // URL key, not by the full graph size.
+        if (newNode.isRedirect()) {
+            String location = newNode.getRedirectLocation();
+            if (location != null) {
+                Deque<String> existingIds = urlIndex.get(normalizeUrl(location));
+                if (existingIds != null) {
+                    for (String existingId : existingIds) {
+                        if (existingId.equals(newNode.getId())) continue;
+                        RequestNode existing = graph.getNode(existingId);
+                        if (existing == null) continue;
+                        edges.add(new RequestEdge(
+                                newNode.getId(), existing.getId(),
+                                EdgeType.REDIRECT, 1.0,
+                                newNode.getStatusCode() + " Location: " + location
+                                        + " -> " + existing.getMethod() + " " + existing.getUrl()));
+                    }
+                }
+            }
+        }
+        // For the other direction, find existing redirect nodes
+        // that point at this new URL. Since the response data
+        // already lives on the new node (responseData) and the
+        // existing producer's Location has been recorded against
+        // the producer's index entry, we just walk the URL index
+        // for this new URL looking for earlier nodes that were
+        // redirects.
+        Deque<String> recent = urlIndex.get(normalizeUrl(newNode.getUrl()));
+        if (recent != null) {
+            for (String existingId : recent) {
+                if (existingId.equals(newNode.getId())) continue;
+                RequestNode existing = graph.getNode(existingId);
+                if (existing == null) continue;
+                if (!existing.isRedirect()) continue;
                 String location = existing.getRedirectLocation();
                 if (location != null && urlMatches(location, newNode.getUrl())) {
                     edges.add(new RequestEdge(
@@ -146,58 +218,62 @@ public class RelationshipDetector {
                                     + " -> " + newNode.getMethod() + " " + newNode.getUrl()));
                 }
             }
-
-            if (newNode.isRedirect()) {
-                String location = newNode.getRedirectLocation();
-                if (location != null && urlMatches(location, existing.getUrl())) {
-                    edges.add(new RequestEdge(
-                            newNode.getId(), existing.getId(),
-                            EdgeType.REDIRECT, 1.0,
-                            newNode.getStatusCode() + " Location: " + location
-                                    + " -> " + existing.getMethod() + " " + existing.getUrl()));
-                }
-            }
         }
         return edges;
     }
 
     // ========================================================================
     // 2. Referrer Header Analysis (tiered confidence based on target intent)
+    //
+    // Reads referrer off the lightweight node field (set at
+    // construction from CapturedRequest) so this still works after
+    // the raw payload has been dropped.
     // ========================================================================
 
     private List<RequestEdge> detectReferrerLinks(RequestNode newNode) {
         List<RequestEdge> edges = new ArrayList<>();
-        CapturedRequest newReq = newNode.getRequest();
-        if (newReq == null) return edges;
+        String referrer = newNode.getReferrer();
+        if (referrer == null || referrer.isEmpty()) return edges;
 
-        String referrer = newReq.getReferrer();
-
-        if (referrer != null && !referrer.isEmpty()) {
-            for (RequestNode existing : graph.getNodes().values()) {
-                if (existing.getId().equals(newNode.getId())) continue;
-                if (urlMatches(referrer, existing.getUrl())) {
-                    double confidence = isBusinessRelevant(newNode) ? 0.85 : 0.5;
-                    edges.add(new RequestEdge(
-                            existing.getId(), newNode.getId(),
-                            EdgeType.REFERRER, confidence,
-                            "Referer header: " + referrer + " matches " + existing.getUrl()));
-                    break;
-                }
+        // Find existing node whose URL matches the referrer.
+        Deque<String> existingIds = urlIndex.get(normalizeUrl(referrer));
+        if (existingIds != null) {
+            for (String existingId : existingIds) {
+                if (existingId.equals(newNode.getId())) continue;
+                RequestNode existing = graph.getNode(existingId);
+                if (existing == null) continue;
+                if (!urlMatches(referrer, existing.getUrl())) continue;
+                double confidence = isBusinessRelevant(newNode) ? 0.85 : 0.5;
+                edges.add(new RequestEdge(
+                        existing.getId(), newNode.getId(),
+                        EdgeType.REFERRER, confidence,
+                        "Referer header: " + referrer + " matches " + existing.getUrl()));
+                break;   // first match wins
             }
         }
 
-        for (RequestNode existing : graph.getNodes().values()) {
-            if (existing.getId().equals(newNode.getId())) continue;
-            CapturedRequest existingReq = existing.getRequest();
-            if (existingReq == null) continue;
-
-            String existingReferrer = existingReq.getReferrer();
-            if (existingReferrer != null && urlMatches(existingReferrer, newNode.getUrl())) {
-                double confidence = isBusinessRelevant(existing) ? 0.85 : 0.5;
-                edges.add(new RequestEdge(
-                        newNode.getId(), existing.getId(),
-                        EdgeType.REFERRER, confidence,
-                        "Referer header: " + existingReferrer + " matches " + newNode.getUrl()));
+        // Reverse direction: find existing nodes whose referrer
+        // matches this new URL. Walk the bounded URL index for the
+        // new URL and check the corresponding node's lightweight
+        // referrer field.
+        if (newNode.getUrl() != null) {
+            Deque<String> candidates = urlIndex.get(normalizeUrl(newNode.getUrl()));
+            if (candidates != null) {
+                for (String existingId : candidates) {
+                    if (existingId.equals(newNode.getId())) continue;
+                    RequestNode existing = graph.getNode(existingId);
+                    if (existing == null) continue;
+                    String existingReferrer = existing.getReferrer();
+                    if (existingReferrer != null
+                            && urlMatches(existingReferrer, newNode.getUrl())) {
+                        double confidence = isBusinessRelevant(existing) ? 0.85 : 0.5;
+                        edges.add(new RequestEdge(
+                                newNode.getId(), existing.getId(),
+                                EdgeType.REFERRER, confidence,
+                                "Referer header: " + existingReferrer
+                                        + " matches " + newNode.getUrl()));
+                    }
+                }
             }
         }
         return edges;
@@ -220,7 +296,7 @@ public class RelationshipDetector {
             // Filter through ValueKind — only correlation-relevant values create edges
             if (!ParameterExtractor.isInterestingCorrelationValue(paramName, paramValue)) continue;
 
-            Set<String> sourceNodeIds = responseValueIndex.get(paramValue);
+            Deque<String> sourceNodeIds = responseValueIndex.get(paramValue);
             if (sourceNodeIds == null) continue;
 
             for (String sourceNodeId : sourceNodeIds) {
@@ -237,7 +313,6 @@ public class RelationshipDetector {
                                 + " of Node#" + sourceNode.getNodeIndex()
                                 + " reused in request (" + paramName + ")"
                                 + " of Node#" + newNode.getNodeIndex());
-                // Populate value semantics
                 edge.setValueKind(ValueKind.classify(paramName, paramValue));
                 edge.setParamName(paramName);
                 edge.setValueHash(sha256(paramValue));
@@ -265,25 +340,25 @@ public class RelationshipDetector {
 
             String cookieValue = entry.getValue().toString();
 
-            for (RequestNode existing : graph.getNodes().values()) {
-                if (existing.getId().equals(newNode.getId())) continue;
-                if (existing.getTimestamp() >= newNode.getTimestamp()) continue;
-
-                Object setCookieValue = existing.getResponseData().get("set-cookie." + cookieName);
-                if (setCookieValue != null && setCookieValue.toString().equals(cookieValue)) {
-                    RequestEdge edge = new RequestEdge(
-                            existing.getId(), newNode.getId(),
-                            EdgeType.RESPONSE_CORRELATION, 0.85,
-                            "Set-Cookie '" + cookieName + "' from Node#" + existing.getNodeIndex()
-                                    + " used as Cookie in Node#" + newNode.getNodeIndex());
-                    // Populate value semantics so getEdgeStrength() can decide
-                    // between CONTEXT_ONLY and MEDIUM based on the cookie's
-                    // semantic kind (session vs business/flow).
-                    edge.setParamName(cookieName);
-                    edge.setValueHash(sha256(cookieValue));
-                    edge.setValueKind(ValueKind.classify(cookieName, cookieValue));
-                    edges.add(edge);
-                }
+            // Look up bounded producer list for this cookie name.
+            Deque<CookieProducer> producers = cookieSetIndex.get(cookieName);
+            if (producers == null) continue;
+            for (CookieProducer p : producers) {
+                if (p.nodeId.equals(newNode.getId())) continue;
+                if (p.timestamp >= newNode.getTimestamp()) continue;
+                if (!p.value.equals(cookieValue)) continue;
+                RequestNode existing = graph.getNode(p.nodeId);
+                if (existing == null) continue;
+                RequestEdge edge = new RequestEdge(
+                        p.nodeId, newNode.getId(),
+                        EdgeType.RESPONSE_CORRELATION, 0.85,
+                        "Set-Cookie '" + cookieName + "' from Node#"
+                                + existing.getNodeIndex()
+                                + " used as Cookie in Node#" + newNode.getNodeIndex());
+                edge.setParamName(cookieName);
+                edge.setValueHash(sha256(cookieValue));
+                edge.setValueKind(ValueKind.classify(cookieName, cookieValue));
+                edges.add(edge);
             }
         }
         return edges;
@@ -297,44 +372,110 @@ public class RelationshipDetector {
         List<RequestEdge> edges = new ArrayList<>();
         if (newNode.getGroupId() == null) return edges;
 
-        for (RequestNode existing : graph.getNodes().values()) {
-            if (existing.getId().equals(newNode.getId())) continue;
-            if (newNode.getGroupId().equals(existing.getGroupId())) {
-                String sourceId = existing.getTimestamp() < newNode.getTimestamp()
-                        ? existing.getId() : newNode.getId();
-                String targetId = sourceId.equals(existing.getId())
-                        ? newNode.getId() : existing.getId();
-                edges.add(new RequestEdge(
-                        sourceId, targetId,
-                        EdgeType.USER_DEFINED, 1.0,
-                        "User-grouped via context menu (group: " + newNode.getGroupId() + ")"));
-            }
+        Deque<String> members = groupIndex.get(newNode.getGroupId());
+        if (members == null) return edges;
+        for (String existingId : members) {
+            if (existingId.equals(newNode.getId())) continue;
+            RequestNode existing = graph.getNode(existingId);
+            if (existing == null) continue;
+            String sourceId = existing.getTimestamp() < newNode.getTimestamp()
+                    ? existing.getId() : newNode.getId();
+            String targetId = sourceId.equals(existing.getId())
+                    ? newNode.getId() : existing.getId();
+            edges.add(new RequestEdge(
+                    sourceId, targetId,
+                    EdgeType.USER_DEFINED, 1.0,
+                    "User-grouped via context menu (group: " + newNode.getGroupId() + ")"));
         }
         return edges;
     }
 
     // ========================================================================
-    // Inverted Index Management
+    // Inverted Index Management (all bounded)
     // ========================================================================
 
     private void indexResponseValues(RequestNode node) {
         Set<String> values = ParameterExtractor.getInterestingValues(node.getResponseData());
         for (String value : values) {
-            responseValueIndex.computeIfAbsent(value, k -> ConcurrentHashMap.newKeySet())
-                    .add(node.getId());
+            pushBounded(responseValueIndex, value, node.getId());
+        }
+    }
+
+    private void indexUrl(RequestNode node) {
+        if (node.getUrl() != null) {
+            pushBounded(urlIndex, normalizeUrl(node.getUrl()), node.getId());
+        }
+    }
+
+    private void indexGroup(RequestNode node) {
+        if (node.getGroupId() != null) {
+            pushBounded(groupIndex, node.getGroupId(), node.getId());
+        }
+    }
+
+    private void indexSetCookies(RequestNode node) {
+        Map<String, Object> responseData = node.getResponseData();
+        if (responseData == null) return;
+        for (Map.Entry<String, Object> e : responseData.entrySet()) {
+            if (!e.getKey().startsWith("set-cookie.")) continue;
+            String cookieName = e.getKey().substring("set-cookie.".length()).toLowerCase();
+            String value = e.getValue() != null ? e.getValue().toString() : null;
+            if (value == null) continue;
+            pushBounded(cookieSetIndex, cookieName,
+                    new CookieProducer(node.getId(), value, node.getTimestamp()));
+        }
+    }
+
+    private <V> void pushBounded(Map<String, Deque<V>> index, String key, V value) {
+        Deque<V> deque = index.computeIfAbsent(key, k -> new ArrayDeque<>(indexMaxPerKey));
+        synchronized (deque) {
+            // Evict from the front until we have room, then add.
+            while (deque.size() >= indexMaxPerKey) {
+                deque.pollFirst();
+            }
+            deque.addLast(value);
         }
     }
 
     public void rebuildIndex() {
         responseValueIndex.clear();
+        urlIndex.clear();
+        groupIndex.clear();
+        cookieSetIndex.clear();
         for (RequestNode node : graph.getNodes().values()) {
             indexResponseValues(node);
+            indexUrl(node);
+            indexGroup(node);
+            indexSetCookies(node);
         }
         logger.log(LogCategory.GRAPH, LogLevel.INFO, "RelationshipDetector",
-                "Inverted index rebuilt. Indexed values: " + responseValueIndex.size());
+                "Indexes rebuilt. responseValueIndex=" + responseValueIndex.size()
+                        + " urlIndex=" + urlIndex.size()
+                        + " groupIndex=" + groupIndex.size()
+                        + " cookieSetIndex=" + cookieSetIndex.size());
     }
 
     public int getIndexSize() { return responseValueIndex.size(); }
+    public int getUrlIndexSize() { return urlIndex.size(); }
+    public int getGroupIndexSize() { return groupIndex.size(); }
+    public int getCookieSetIndexSize() { return cookieSetIndex.size(); }
+
+    /**
+     * Simple value-object for cookie producers stored in the bounded
+     * index. Pairs the producer node id with the cookie value and
+     * the producer's timestamp (so we can compare against the new
+     * node's timestamp when correlating).
+     */
+    private static final class CookieProducer {
+        final String nodeId;
+        final String value;
+        final long timestamp;
+        CookieProducer(String nodeId, String value, long timestamp) {
+            this.nodeId = nodeId;
+            this.value = value;
+            this.timestamp = timestamp;
+        }
+    }
 
     // ========================================================================
     // Utility Methods

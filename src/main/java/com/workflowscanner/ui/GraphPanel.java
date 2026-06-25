@@ -12,6 +12,8 @@ import com.workflowscanner.llm.LLMAnalysisResult;
 import com.workflowscanner.logging.ExtensionLogger;
 import com.workflowscanner.logging.LogCategory;
 import com.workflowscanner.logging.LogLevel;
+import com.workflowscanner.store.RequestHydrator;
+import com.workflowscanner.store.RequestStore;
 import com.workflowscanner.workflow.WorkflowCandidate;
 import com.workflowscanner.workflow.WorkflowDetector;
 
@@ -38,6 +40,13 @@ public class GraphPanel extends JPanel {
     private final RequestGraph graph;
     private final AnalysisEngine analysisEngine;
     private final ExtensionLogger logger;
+
+    // Optional disk-backed request store. When set, the
+    // View Request/Response and Send to Repeater flows
+    // re-hydrate raw HTTP for the selected node so a backfilled
+    // node whose payload has been dropped from the hot graph
+    // still displays the full request/response.
+    private volatile RequestStore requestStore;
 
     // Workflow candidate display (added in workflow rework)
     private WorkflowDetector workflowDetector;
@@ -204,6 +213,15 @@ public class GraphPanel extends JPanel {
      */
     public void setWorkflowDetector(WorkflowDetector detector) {
         this.workflowDetector = detector;
+    }
+
+    /**
+     * Set the disk-backed request store so the panel can
+     * re-hydrate the selected node's raw HTTP for View
+     * Request/Response and Send to Repeater.
+     */
+    public void setRequestStore(RequestStore store) {
+        this.requestStore = store;
     }
 
     /**
@@ -415,13 +433,21 @@ public class GraphPanel extends JPanel {
     // ========================================================================
 
     private void viewRequest() {
-        if (selectedNode == null || selectedNode.getRequest() == null) return;
+        if (selectedNode == null) return;
+        if (selectedNode.getRequest() == null && requestStore != null) {
+            RequestHydrator.ensureHydrated(selectedNode, requestStore);
+        }
+        if (selectedNode.getRequest() == null) return;
         showTextDialog("Request - Node #" + selectedNode.getNodeIndex(),
                 buildRequestText(selectedNode));
     }
 
     private void viewResponse() {
-        if (selectedNode == null || selectedNode.getRequest() == null) return;
+        if (selectedNode == null) return;
+        if (selectedNode.getRequest() == null && requestStore != null) {
+            RequestHydrator.ensureHydrated(selectedNode, requestStore);
+        }
+        if (selectedNode.getRequest() == null) return;
         showTextDialog("Response - Node #" + selectedNode.getNodeIndex(),
                 buildResponseText(selectedNode));
     }
@@ -435,7 +461,11 @@ public class GraphPanel extends JPanel {
     }
 
     private void sendToRepeater() {
-        if (selectedNode == null || selectedNode.getRequest() == null) return;
+        if (selectedNode == null) return;
+        if (selectedNode.getRequest() == null && requestStore != null) {
+            RequestHydrator.ensureHydrated(selectedNode, requestStore);
+        }
+        if (selectedNode.getRequest() == null) return;
         try {
             var src = selectedNode.getRequest();
             String url = src.getUrl();

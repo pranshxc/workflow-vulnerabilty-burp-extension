@@ -11,6 +11,8 @@ import com.workflowscanner.llm.SuggestedTest;
 import com.workflowscanner.logging.ExtensionLogger;
 import com.workflowscanner.logging.LogCategory;
 import com.workflowscanner.logging.LogLevel;
+import com.workflowscanner.store.RequestHydrator;
+import com.workflowscanner.store.RequestStore;
 import com.workflowscanner.workflow.WorkflowDetector;
 
 import java.util.ArrayList;
@@ -60,6 +62,9 @@ public class ValidationEngine {
 
     private final List<ValidationResult> allResults = new CopyOnWriteArrayList<>();
 
+    // Disk-backed request store for raw HTTP re-hydration.
+    private volatile RequestStore requestStore;
+
     public ValidationEngine(MontoyaApi api, ExtensionConfig config, ExtensionLogger logger) {
         this.api = api;
         this.config = config;
@@ -79,6 +84,18 @@ public class ValidationEngine {
     }
 
     /**
+     * Set the disk-backed request store so the validator can
+     * re-hydrate raw HTTP for nodes whose payload has been
+     * dropped from the hot in-memory graph. The replayer is
+     * also wired so its {@code replay} and {@code fetchGet}
+     * paths can hydrate the same way.
+     */
+    public void setRequestStore(RequestStore store) {
+        this.requestStore = store;
+        this.replayer.setRequestStore(store);
+    }
+
+    /**
      * Validate all findings in a chain verdict.
      * Returns a list of validation results.
      */
@@ -92,7 +109,17 @@ public class ValidationEngine {
                 "Starting validation for chain " + verdict.getChainId()
                         + " (" + verdict.getOverallVerdict() + ")");
 
-        // Run applicable validations based on vulnerability type
+        // Re-hydrate raw HTTP for every node in the chain so the
+        // various validation strategies (state-effect, IDOR, race
+        // detection) have bodies and headers to compare. Without
+        // this, validation against backfilled candidates would
+        // miss every signal because the hot graph had dropped
+        // the raw payload.
+        if (requestStore != null) {
+            for (RequestNode n : chain) {
+                if (n != null) RequestHydrator.ensureHydrated(n, requestStore);
+            }
+        }
         String vulnType = verdict.getVulnerabilityType();
 
         if (vulnType != null) {

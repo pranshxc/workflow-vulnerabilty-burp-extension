@@ -10,6 +10,8 @@ import com.workflowscanner.graph.RequestNode;
 import com.workflowscanner.logging.ExtensionLogger;
 import com.workflowscanner.logging.LogCategory;
 import com.workflowscanner.logging.LogLevel;
+import com.workflowscanner.store.RequestHydrator;
+import com.workflowscanner.store.RequestStore;
 
 import java.net.URLDecoder;
 import java.net.URLEncoder;
@@ -70,10 +72,18 @@ public class RequestReplayer {
 
     private final MontoyaApi api;
     private final ExtensionLogger logger;
+    // Disk-backed request store. When set, replay attempts will
+    // re-hydrate the node's raw HTTP payload from the store if
+    // it has been dropped from the hot in-memory graph.
+    private volatile RequestStore requestStore;
 
     public RequestReplayer(MontoyaApi api, ExtensionLogger logger) {
         this.api = api;
         this.logger = logger;
+    }
+
+    public void setRequestStore(RequestStore store) {
+        this.requestStore = store;
     }
 
     /**
@@ -129,6 +139,15 @@ public class RequestReplayer {
         captured.setUrl(url);
         captured.setMethod("GET");
 
+        // Re-hydrate the context node's raw headers from the
+        // store if the hot graph has dropped them. Without this
+        // a backfilled context would lose its auth/tenant headers
+        // and the GET would hit an unauthenticated endpoint.
+        if (contextNode != null && contextNode.getRequest() == null
+                && requestStore != null) {
+            RequestHydrator.ensureHydrated(contextNode, requestStore);
+        }
+
         if (contextNode != null && contextNode.getRequest() != null
                 && contextNode.getRequest().getRequestHeaders() != null) {
             java.util.Map<String, java.util.List<String>> copied =
@@ -162,6 +181,12 @@ public class RequestReplayer {
      */
     public ReplayResponse replay(RequestNode node, Map<String, String> modifications,
                                   boolean freshSession, List<MutationResult> mutationSink) {
+        // Re-hydrate raw HTTP from the store if the hot graph has
+        // dropped the payload. Without this, validation against
+        // backfilled nodes would always fail.
+        if (node.getRequest() == null && requestStore != null) {
+            RequestHydrator.ensureHydrated(node, requestStore);
+        }
         CapturedRequest captured = node.getRequest();
         if (captured == null || captured.getUrl() == null) {
             logger.log(LogCategory.ANALYSIS, LogLevel.WARN, "RequestReplayer",

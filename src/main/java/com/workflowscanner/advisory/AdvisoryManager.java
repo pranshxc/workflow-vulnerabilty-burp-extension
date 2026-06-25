@@ -14,6 +14,8 @@ import com.workflowscanner.graph.RequestNode;
 import com.workflowscanner.logging.ExtensionLogger;
 import com.workflowscanner.logging.LogCategory;
 import com.workflowscanner.logging.LogLevel;
+import com.workflowscanner.store.RequestHydrator;
+import com.workflowscanner.store.RequestStore;
 import com.workflowscanner.validation.ValidationResult;
 
 import java.util.ArrayList;
@@ -45,10 +47,20 @@ public class AdvisoryManager {
     private final List<WorkflowAuditIssue> allIssues = new CopyOnWriteArrayList<>();
     private final Set<String> dismissedFingerprints = ConcurrentHashMap.newKeySet();
 
+    // Disk-backed request store. When set, the manager re-hydrates
+    // raw HTTP for each chain node before building the evidence
+    // issue so backfilled candidates still produce complete
+    // request/response pairs in the Burp UI.
+    private volatile RequestStore requestStore;
+
     public AdvisoryManager(MontoyaApi api, ExtensionLogger logger) {
         this.api = api;
         this.logger = logger;
         logger.log(LogCategory.ADVISORY, LogLevel.DEBUG, "AdvisoryManager", "Advisory manager created.");
+    }
+
+    public void setRequestStore(RequestStore store) {
+        this.requestStore = store;
     }
 
     /**
@@ -224,6 +236,10 @@ public class AdvisoryManager {
 
         for (RequestNode node : verdict.getChain()) {
             if (node.getUrl() == null) continue;
+            // Re-hydrate from the store if the hot graph dropped raw.
+            if (node.getRequest() == null && requestStore != null) {
+                RequestHydrator.ensureHydrated(node, requestStore);
+            }
             try {
                 // Build Burp HttpRequest from URL
                 HttpRequest request = HttpRequest.httpRequest(node.getUrl());

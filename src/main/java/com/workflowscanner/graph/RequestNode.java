@@ -31,6 +31,15 @@ public class RequestNode {
     private RequestClassification classification;
     private EndpointKey endpointKey;
 
+    // Lightweight metadata copied off the raw request at construction
+    // time so referrer edge detection, content-type checks, and mime
+    // routing still work after the raw payload has been evicted from
+    // the hot graph (and reloaded from RequestStore on demand).
+    private String referrer;
+    private String contentType;
+    private String mimeType;
+    private String source;  // CapturedRequest.Source.name() at the time of capture
+
     public RequestNode(CapturedRequest request, int nodeIndex) {
         this.id = request.getId();
         this.request = request;
@@ -42,6 +51,10 @@ public class RequestNode {
         this.timestamp = request.getTimestamp();
         this.nodeIndex = nodeIndex;
         this.groupId = request.getGroupId();
+        this.referrer = request.getReferrer();
+        this.contentType = request.getContentType();
+        this.mimeType = request.getMimeType();
+        if (request.getSource() != null) this.source = request.getSource().name();
         this.extractedParams = new HashMap<>();
         this.responseData = new HashMap<>();
     }
@@ -95,6 +108,20 @@ public class RequestNode {
 
     public EndpointKey getEndpointKey() { return endpointKey; }
     public void setEndpointKey(EndpointKey endpointKey) { this.endpointKey = endpointKey; }
+
+    // --- Lightweight metadata (survives raw eviction) ---
+
+    public String getReferrer() { return referrer; }
+    public void setReferrer(String referrer) { this.referrer = referrer; }
+
+    public String getContentType() { return contentType; }
+    public void setContentType(String contentType) { this.contentType = contentType; }
+
+    public String getMimeType() { return mimeType; }
+    public void setMimeType(String mimeType) { this.mimeType = mimeType; }
+
+    public String getSource() { return source; }
+    public void setSource(String source) { this.source = source; }
 
     /**
      * Check if this is a redirect response (3xx).

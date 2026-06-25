@@ -15,6 +15,8 @@ import com.workflowscanner.llm.SystemPrompt;
 import com.workflowscanner.logging.ExtensionLogger;
 import com.workflowscanner.logging.LogCategory;
 import com.workflowscanner.logging.LogLevel;
+import com.workflowscanner.store.RequestHydrator;
+import com.workflowscanner.store.RequestStore;
 import com.workflowscanner.workflow.WorkflowCandidate;
 import com.workflowscanner.workflow.WorkflowDetector;
 import com.workflowscanner.workflow.WorkflowType;
@@ -54,6 +56,11 @@ public class AnalysisEngine {
 
     private WorkflowDetector workflowDetector;
     private ApplicationModel applicationModel;
+    // Disk-backed request store, used to re-hydrate raw HTTP
+    // payloads that have been dropped from the hot in-memory
+    // graph. When set, every candidate step is hydrated before
+    // prompt building.
+    private volatile RequestStore requestStore;
 
     private ExecutorService executor;
     private final AtomicBoolean running = new AtomicBoolean(false);
@@ -100,6 +107,16 @@ public class AnalysisEngine {
      */
     public void setApplicationModel(ApplicationModel model) {
         this.applicationModel = model != null ? model : new ApplicationModel();
+    }
+
+    /**
+     * Set the disk-backed request store so the analysis engine
+     * can re-hydrate raw HTTP for nodes whose payload has been
+     * dropped from the hot graph. When the store is wired, every
+     * candidate step is hydrated before the LLM prompt is built.
+     */
+    public void setRequestStore(RequestStore store) {
+        this.requestStore = store;
     }
 
     /**
@@ -260,7 +277,15 @@ public class AnalysisEngine {
         // Convert WorkflowStep -> RequestNode for backward compat
         List<RequestNode> nodes = new ArrayList<>();
         for (RequestNode step : candidate.getSteps()) {
-            if (step != null) nodes.add(step);
+            if (step != null) {
+                // Re-hydrate raw HTTP from the store if needed so
+                // prompt building has full request/response bodies
+                // to send to the LLM.
+                if (requestStore != null) {
+                    RequestHydrator.ensureHydrated(step, requestStore);
+                }
+                nodes.add(step);
+            }
         }
         verdict.setChain(nodes);
         verdict.setState(AnalysisState.ANALYZING);
