@@ -123,6 +123,21 @@ public class RequestNode {
     public String getSource() { return source; }
     public void setSource(String source) { this.source = source; }
 
+    // --- Safe accessors for payload (request is transient; may be null
+    //     after deserialization from disk until RequestHydrator re-loads it).
+
+    public String getRequestBody() {
+        return request != null ? request.getRequestBody() : null;
+    }
+
+    public String getResponseBody() {
+        return request != null ? request.getResponseBody() : null;
+    }
+
+    public java.util.Map<String, java.util.List<String>> getRequestHeaders() {
+        return request != null ? request.getRequestHeaders() : null;
+    }
+
     /**
      * Check if this is a redirect response (3xx).
      */

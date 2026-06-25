@@ -77,6 +77,11 @@ public class AdvisoryManager {
     private final AtomicLong suppressedPublicResource = new AtomicLong(0);
     private final AtomicLong suppressedValidationFailed = new AtomicLong(0);
     private final AtomicLong suppressedLowSignal = new AtomicLong(0);
+    private final AtomicLong suppressedZeroConfidence = new AtomicLong(0);
+    private final AtomicLong suppressedLLMOnly = new AtomicLong(0);
+    private final AtomicLong suppressedUnconfirmed = new AtomicLong(0);
+    private final AtomicLong suppressedInfrastructurePolling = new AtomicLong(0);
+    private final AtomicLong suppressedReadOnlySessionOnly = new AtomicLong(0);
     private final AtomicLong reportedNeedsReview = new AtomicLong(0);
     private final AtomicLong reportedConfirmed = new AtomicLong(0);
 
@@ -137,6 +142,26 @@ public class AdvisoryManager {
                                                   WorkflowCandidate candidate) {
         if (verdict == null) return null;
 
+        // === P0-QUALITY-GATE: hard guard for zero confidence ===
+        // Even if the gate has a bug, never create an issue from a
+        // 0% confidence verdict (which means the LLM did not commit
+        // to a finding). This is the last line of defense.
+        if (verdict.getOverallConfidence() <= 0.0) {
+            boolean hasStrictConfirmation = validationResults != null
+                    && validationResults.stream().anyMatch(ValidationResult::isConfirmedStrict);
+            if (!hasStrictConfirmation) {
+                suppressedZeroConfidence.incrementAndGet();
+                suppressedByGate.incrementAndGet();
+                if (logger != null) {
+                    logger.log(LogCategory.ADVISORY, LogLevel.DEBUG, "AdvisoryManager",
+                            "Suppressed hard-guard: zero confidence, no strict confirmation: "
+                                    + verdict.getVulnerabilityType()
+                                    + " chain=" + verdict.getChainId());
+                }
+                return null;
+            }
+        }
+
         // Reportability gate: if it suppresses, return null BEFORE
         // the safe-verdict / dedup short-circuits, so the counters
         // for suppression are always incremented when the gate is
@@ -150,8 +175,12 @@ public class AdvisoryManager {
                 switch (decision) {
                     case SUPPRESS_PUBLIC_RESOURCE: suppressedPublicResource.incrementAndGet(); break;
                     case SUPPRESS_VALIDATION_FAILED: suppressedValidationFailed.incrementAndGet(); break;
+                    case SUPPRESS_INFRASTRUCTURE_POLLING: suppressedInfrastructurePolling.incrementAndGet(); break;
+                    case SUPPRESS_ZERO_CONFIDENCE: suppressedZeroConfidence.incrementAndGet(); break;
+                    case SUPPRESS_LLM_ONLY: suppressedLLMOnly.incrementAndGet(); break;
+                    case SUPPRESS_UNCONFIRMED: suppressedUnconfirmed.incrementAndGet(); break;
+                    case SUPPRESS_READ_ONLY_SESSION_ONLY: suppressedReadOnlySessionOnly.incrementAndGet(); break;
                     case SUPPRESS_LOW_SIGNAL:
-                    case SUPPRESS_READ_ONLY_SESSION_ONLY:
                     default: suppressedLowSignal.incrementAndGet(); break;
                 }
                 if (logger != null) {
@@ -169,7 +198,26 @@ public class AdvisoryManager {
                 reportedNeedsReview.incrementAndGet();
             }
         } else {
-            // No gate wired — keep the legacy safe-verdict short-circuit.
+            // === P0-QUALITY-GATE: no gate wired is a fail-closed path ===
+            // Without a gate, refuse to create issues from unconfirmed
+            // findings. The only safe branch is CONFIRMED strict
+            // validation or a safe verdict (suppressed below).
+            if (!verdict.isSafe()) {
+                boolean hasStrictConfirmation = validationResults != null
+                        && validationResults.stream().anyMatch(ValidationResult::isConfirmedStrict);
+                if (!hasStrictConfirmation) {
+                    suppressedByGate.incrementAndGet();
+                    suppressedLowSignal.incrementAndGet();
+                    if (logger != null) {
+                        logger.log(LogCategory.ADVISORY, LogLevel.WARN, "AdvisoryManager",
+                                "No reportability gate wired; suppressed unconfirmed finding: "
+                                        + verdict.getVulnerabilityType()
+                                        + " chain=" + verdict.getChainId());
+                    }
+                    return null;
+                }
+            }
+            // Safe verdict short-circuit (no issue, but don't suppress-count).
             if (verdict.isSafe()) return null;
         }
 
@@ -440,6 +488,21 @@ public class AdvisoryManager {
 
     /** Findings suppressed as low-signal (no probable/explicit/state-change/critical). */
     public long getSuppressedLowSignalCount() { return suppressedLowSignal.get(); }
+
+    /** Findings suppressed because verdict confidence was 0%. */
+    public long getSuppressedZeroConfidenceCount() { return suppressedZeroConfidence.get(); }
+
+    /** Findings suppressed because they are LLM-only with no validation. */
+    public long getSuppressedLLMOnlyCount() { return suppressedLLMOnly.get(); }
+
+    /** Findings suppressed because they are unconfirmed. */
+    public long getSuppressedUnconfirmedCount() { return suppressedUnconfirmed.get(); }
+
+    /** Findings suppressed because the chain contains infrastructure polling. */
+    public long getSuppressedInfrastructurePollingCount() { return suppressedInfrastructurePolling.get(); }
+
+    /** Findings suppressed because they are read-only session-only. */
+    public long getSuppressedReadOnlySessionOnlyCount() { return suppressedReadOnlySessionOnly.get(); }
 
     /** Findings reported as needs-review (probable validation / explicit edges / state-change / critical). */
     public long getReportedNeedsReviewCount() { return reportedNeedsReview.get(); }

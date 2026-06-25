@@ -1,5 +1,7 @@
 package com.workflowscanner.analysis;
 
+import com.workflowscanner.classification.NoiseRulesConfig;
+import com.workflowscanner.classification.PrivateContextDetector;
 import com.workflowscanner.config.ExtensionConfig;
 import com.workflowscanner.graph.EdgeType;
 import com.workflowscanner.graph.RequestEdge;
@@ -85,10 +87,17 @@ public class ReportabilityGate {
 
     private final ExtensionConfig config;
     private final ExtensionLogger logger;
+    private final PublicResourceClassifier publicResourceClassifier;
+    private final PrivateContextDetector privateContextDetector;
 
     public ReportabilityGate(ExtensionConfig config, ExtensionLogger logger) {
         this.config = config;
         this.logger = logger;
+        NoiseRulesConfig nrc = config != null && config.getNoiseRules() != null
+                ? config.getNoiseRules()
+                : NoiseRulesConfig.withDefaults();
+        this.publicResourceClassifier = new PublicResourceClassifier(nrc);
+        this.privateContextDetector = new PrivateContextDetector(nrc);
     }
 
     /**
@@ -110,23 +119,52 @@ public class ReportabilityGate {
                                         WorkflowCandidate candidate,
                                         List<ValidationResult> validationResults,
                                         String customReason) {
+        // === P0-QUALITY-GATE: fail closed ===
+        // The gate must default to SUPPRESS, never REPORT, so a
+        // bug elsewhere in the pipeline cannot leak unconfirmed
+        // findings to the Burp issue list.
+
+        // (0a) No verdict -> no issue.
         if (verdict == null) {
+            logDecision(verdict, candidate, ReportabilityDecision.SUPPRESS_LOW_SIGNAL,
+                    customReason + " (no verdict)");
             return ReportabilityDecision.SUPPRESS_LOW_SIGNAL;
         }
+
+        // (0b) No candidate -> only report on strict confirmation.
         if (candidate == null) {
+            boolean hasStrictConfirmation = validationResults != null
+                    && validationResults.stream().anyMatch(ValidationResult::isConfirmedStrict);
+            if (hasStrictConfirmation && (verdict.isVulnerable() || verdict.isSuspicious())) {
+                return report(verdict, candidate, ReportabilityDecision.REPORT_CONFIRMED,
+                        customReason + " (strict confirmation, no candidate)");
+            }
+            logDecision(verdict, candidate, ReportabilityDecision.SUPPRESS_LOW_SIGNAL,
+                    customReason + " (no candidate, no strict confirmation)");
             return ReportabilityDecision.SUPPRESS_LOW_SIGNAL;
         }
 
         boolean isSafe = verdict.isSafe();
         boolean isVulnerable = verdict.isVulnerable();
         boolean isSuspicious = verdict.isSuspicious();
+        double confidence = verdict.getOverallConfidence();
 
-        // Safe verdicts never produce issues regardless of
-        // everything else.
+        // (0c) Safe verdict never produces an issue.
         if (isSafe) {
-            logDecision(verdict, candidate, ReportabilityDecision.SUPPRESS_LOW_SIGNAL,
+            return suppress(verdict, candidate, ReportabilityDecision.SUPPRESS_LOW_SIGNAL,
                     customReason + " (overallVerdict=SAFE)");
-            return ReportabilityDecision.SUPPRESS_LOW_SIGNAL;
+        }
+
+        // (0d) Zero confidence -> the LLM did not commit to a finding.
+        // Even if validation later produces strict confirmation we
+        // will catch that in (1). The default is to suppress.
+        if (confidence <= 0.0) {
+            boolean hasStrictConfirmation = validationResults != null
+                    && validationResults.stream().anyMatch(ValidationResult::isConfirmedStrict);
+            if (!hasStrictConfirmation) {
+                return suppress(verdict, candidate, ReportabilityDecision.SUPPRESS_ZERO_CONFIDENCE,
+                        customReason + " (zero confidence, no strict confirmation)");
+            }
         }
 
         boolean hasStrictConfirmation = validationResults != null
@@ -155,6 +193,13 @@ public class ReportabilityGate {
 
         boolean readOnly = !hasStateChanging;
         boolean sessionOnly = !hasExplicitEdges;
+        boolean isInfrastructurePolling = candidate.getSteps() != null
+                && candidate.getSteps().stream().anyMatch(n ->
+                        n.getClassification() != null
+                                && (n.getClassification().getIntent()
+                                        == com.workflowscanner.classification.RequestIntent.TELEMETRY_ANALYTICS
+                                || n.getClassification().getIntent()
+                                        == com.workflowscanner.classification.RequestIntent.BACKGROUND_POLLING));
 
         // (1) Strict confirmation always wins. Any CONFIRMED test
         //     means the business effect was observed.
@@ -163,18 +208,34 @@ public class ReportabilityGate {
                     customReason + " (strict confirmation)");
         }
 
-        // (2) Public-resource pattern: blockchain wallet, token
-        //     price, allowance — the data is public by design. The
-        //     LLM is likely calling this IDOR; the gate refuses
-        //     unless the candidate carries an auth-bound ownership
-        //     edge.
-        if (PublicResourceClassifier.isPublicResourceFinding(candidate)) {
+        // (2) Infrastructure polling pattern: telemetry, feature
+        //     flags, /collect, /metrics. The candidate contains at
+        //     least one step classified as TELEMETRY_ANALYTICS or
+        //     BACKGROUND_POLLING.
+        if (isInfrastructurePolling) {
             return suppress(verdict, candidate,
-                    ReportabilityDecision.SUPPRESS_PUBLIC_RESOURCE,
-                    customReason + " (public-resource pattern, no auth-bound ownership)");
+                    ReportabilityDecision.SUPPRESS_INFRASTRUCTURE_POLLING,
+                    customReason + " (telemetry / feature-flag / polling endpoint in chain)");
         }
 
-        // (3) All validation tests failed AND user has not opted in
+        // (3) Public-resource pattern: a read-only public data lookup
+        //     (price, weather, blog, blockchain balance, public
+        //     catalog item) where the chain carries no private
+        //     context. The LLM is likely calling this IDOR; the gate
+        //     refuses unless the candidate has auth-bound
+        //     ownership.
+        if (publicResourceClassifier.isPublicResourceFinding(candidate)) {
+            RequestNode privateStep = privateContextDetector.findPrivateContextStep(
+                    candidate.getSteps());
+            String privContextNote = privateStep != null
+                    ? " (private-context step present: " + privateStep.getPath() + ")"
+                    : " (no private context in chain)";
+            return suppress(verdict, candidate,
+                    ReportabilityDecision.SUPPRESS_PUBLIC_RESOURCE,
+                    customReason + " (public-data lookup, no auth-bound ownership" + privContextNote + ")");
+        }
+
+        // (4) All validation tests failed AND user has not opted in
         //     to failed-validation hypotheses. The validation
         //     engine emits ERROR / NOT_CONFIRMED when:
         //       - the mutation could not be applied,
@@ -191,7 +252,27 @@ public class ReportabilityGate {
             // User opted in: continue to the next check.
         }
 
-        // (4) Read-only session-only candidate with no validation
+        // (5) LLM-only finding: no validation ran at all. Without
+        //     the reportLLMOnlyFindings opt-in, suppress.
+        if (validationSkipped) {
+            if (!config.isReportLLMOnlyFindings()) {
+                return suppress(verdict, candidate,
+                        ReportabilityDecision.SUPPRESS_LLM_ONLY,
+                        customReason + " (no validation ran; reportLLMOnlyFindings=false)");
+            }
+        }
+
+        // (6) Unconfirmed finding (no strict, no probable) AND
+        //     user has not opted in to unconfirmed reports.
+        if (!hasStrictConfirmation && !hasProbableValidation) {
+            if (!config.isReportUnconfirmedFindings()) {
+                return suppress(verdict, candidate,
+                        ReportabilityDecision.SUPPRESS_UNCONFIRMED,
+                        customReason + " (unconfirmed; reportUnconfirmedFindings=false)");
+            }
+        }
+
+        // (7) Read-only session-only candidate with no validation
         //     support. The exact pattern from the noisy 1inch
         //     dataset: GET /price, GET /balance, GET /price.
         if (readOnly && sessionOnly && !hasProbableValidation && !userDefined) {
@@ -202,7 +283,7 @@ public class ReportabilityGate {
             }
         }
 
-        // (5) Has any of: probable validation, explicit edge, state
+        // (8) Has any of: probable validation, explicit edge, state
         //     change, critical workflow type, or user-defined group.
         if (hasProbableValidation || hasExplicitEdges || hasStateChanging
                 || criticalWorkflow || userDefined) {
@@ -218,7 +299,7 @@ public class ReportabilityGate {
             }
         }
 
-        // (6) Fallback: no evidence worth a Burp issue.
+        // (9) Fallback: no evidence worth a Burp issue.
         return suppress(verdict, candidate, ReportabilityDecision.SUPPRESS_LOW_SIGNAL,
                 customReason + " (no probable/explicit/state-change/critical/user-defined)");
     }
@@ -247,21 +328,50 @@ public class ReportabilityGate {
     private void logDecision(ChainVerdict verdict, WorkflowCandidate candidate,
                               ReportabilityDecision decision, String customReason) {
         if (logger == null) return;
+        // === P0-QUALITY-GATE: enriched suppression log ===
+        // Every suppression logs candidate id, verdict, confidence,
+        // workflow type, step count, edge counts, and decision reason
+        // so the user can see exactly what was filtered and why.
         String tag = (decision.shouldReport() ? "REPORT" : "SUPPRESS")
                 + " " + decision.name();
-        String chain = verdict.getChainId() != null ? verdict.getChainId() : "<no-id>";
-        String type = verdict.getVulnerabilityType() != null
+        String chain = verdict != null && verdict.getChainId() != null ? verdict.getChainId() : "<no-id>";
+        String type = verdict != null && verdict.getVulnerabilityType() != null
                 ? verdict.getVulnerabilityType() : "unknown";
         String reason = decision.defaultReason();
         if (customReason != null && !customReason.isEmpty()) {
             reason = customReason;
+        }
+        double confidence = verdict != null ? verdict.getOverallConfidence() : 0.0;
+        String verdictStr = verdict != null && verdict.getOverallVerdict() != null
+                ? verdict.getOverallVerdict() : "<null>";
+        int stepCount = candidate != null && candidate.getSteps() != null
+                ? candidate.getSteps().size() : 0;
+        int explicitEdges = candidate != null ? candidate.getExplicitSupportingEdgeCount() : 0;
+        boolean hasStateChanging = candidate != null && candidate.getSteps() != null
+                && candidate.getSteps().stream().anyMatch(n -> {
+                    String m = n.getMethod() == null ? "" : n.getMethod().toUpperCase();
+                    return "POST".equals(m) || "PUT".equals(m) || "PATCH".equals(m) || "DELETE".equals(m);
+                });
+        String workflowType = candidate != null && candidate.getWorkflowType() != null
+                ? candidate.getWorkflowType().name() : "<null>";
+        String host = "<none>";
+        if (candidate != null && candidate.getSteps() != null && !candidate.getSteps().isEmpty()) {
+            String h = candidate.getSteps().get(0).getHost();
+            if (h != null) host = h;
         }
         try {
             logger.log(LogCategory.ADVISORY,
                     decision.shouldReport() ? LogLevel.INFO : LogLevel.DEBUG,
                     "ReportabilityGate",
                     tag + " chain=" + chain
+                            + " verdict=" + verdictStr
+                            + " confidence=" + String.format("%.2f", confidence)
                             + " type=" + type
+                            + " workflowType=" + workflowType
+                            + " host=" + host
+                            + " steps=" + stepCount
+                            + " explicitEdges=" + explicitEdges
+                            + " stateChanging=" + hasStateChanging
                             + " candidateScore=" + String.format("%.1f",
                                     candidate != null ? candidate.getWorkflowScore() : 0)
                             + " reason=" + reason);

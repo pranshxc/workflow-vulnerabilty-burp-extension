@@ -105,6 +105,16 @@ public class RequestGraph {
     }
 
     public void addEdge(RequestEdge edge) {
+        if (edge == null || edge.getType() == null) return;
+        // === P0-QUALITY-GATE: never store TIME_WINDOW edges ===
+        // They are kept in the EdgeType enum for backward compat
+        // (and so old graph-edges.json files still deserialize),
+        // but they must not enter the live graph. See the audit:
+        // 18,303 TIME_WINDOW edges were 72% of all edges in a real
+        // dataset and contributed zero workflow signal.
+        if (edge.getType() == EdgeType.TIME_WINDOW) {
+            return;
+        }
         edges.add(edge);
         AtomicInteger typeCounter = edgesByType.get(edge.getType());
         if (typeCounter != null) {

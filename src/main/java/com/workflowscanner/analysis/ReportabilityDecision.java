@@ -52,8 +52,16 @@ public enum ReportabilityDecision {
     REPORT_CONFIRMED(true, "Strict validation proof (CONFIRMED)"),
     /** Has probable validation OR explicit edges OR state-changing steps OR critical workflow type. */
     REPORT_NEEDS_REVIEW(true, "Has probable validation / explicit edges / state-changing steps / critical workflow type"),
+    /** Verdict confidence was zero (LLM did not commit to a finding). */
+    SUPPRESS_ZERO_CONFIDENCE(false, "Verdict confidence is 0.0 — LLM did not commit to a finding"),
+    /** LLM-only finding with no validation; user has not opted in via reportLLMOnlyFindings. */
+    SUPPRESS_LLM_ONLY(false, "LLM-only finding with no validation; reportLLMOnlyFindings=false"),
+    /** Unconfirmed finding; user has not opted in via reportUnconfirmedFindings. */
+    SUPPRESS_UNCONFIRMED(false, "Unconfirmed finding; reportUnconfirmedFindings=false"),
     /** Public blockchain / token / price resource pattern with no auth-bound ownership proof. */
     SUPPRESS_PUBLIC_RESOURCE(false, "Public-resource pattern (blockchain wallet / token price) with no ownership proof"),
+    /** Telemetry / feature-flag / collect / metrics / faro endpoint (infrastructure polling). */
+    SUPPRESS_INFRASTRUCTURE_POLLING(false, "Telemetry / feature-flag / metrics endpoint (infrastructure polling)"),
     /** All validation tests failed or were skipped and user has not opted in to failed hypotheses. */
     SUPPRESS_VALIDATION_FAILED(false, "All validation tests failed / not confirmed"),
     /** Read-only GET sequence on a session-only candidate with no explicit edges. */

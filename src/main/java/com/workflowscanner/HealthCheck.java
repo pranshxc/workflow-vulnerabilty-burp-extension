@@ -279,12 +279,23 @@ public class HealthCheck {
         // advisory manager means the values are accurate even if
         // the gate's decisions were spread across multiple chains.
         if (advisoryManager != null) {
+            // === P0-QUALITY-GATE: surface every suppression bucket ===
             metrics.put("reportability_gated_total",
                     String.valueOf(advisoryManager.getSuppressedByGateCount()));
+            metrics.put("reportability_gated_zero_confidence",
+                    String.valueOf(advisoryManager.getSuppressedZeroConfidenceCount()));
+            metrics.put("reportability_gated_llm_only",
+                    String.valueOf(advisoryManager.getSuppressedLLMOnlyCount()));
+            metrics.put("reportability_gated_unconfirmed",
+                    String.valueOf(advisoryManager.getSuppressedUnconfirmedCount()));
             metrics.put("reportability_gated_public_resource",
                     String.valueOf(advisoryManager.getSuppressedPublicResourceCount()));
+            metrics.put("reportability_gated_infrastructure_polling",
+                    String.valueOf(advisoryManager.getSuppressedInfrastructurePollingCount()));
             metrics.put("reportability_gated_validation_failed",
                     String.valueOf(advisoryManager.getSuppressedValidationFailedCount()));
+            metrics.put("reportability_gated_read_only_session_only",
+                    String.valueOf(advisoryManager.getSuppressedReadOnlySessionOnlyCount()));
             metrics.put("reportability_gated_low_signal",
                     String.valueOf(advisoryManager.getSuppressedLowSignalCount()));
             metrics.put("reportability_gated_reported_confirmed",
@@ -293,8 +304,13 @@ public class HealthCheck {
                     String.valueOf(advisoryManager.getReportedNeedsReviewCount()));
         } else {
             metrics.put("reportability_gated_total", "0");
+            metrics.put("reportability_gated_zero_confidence", "0");
+            metrics.put("reportability_gated_llm_only", "0");
+            metrics.put("reportability_gated_unconfirmed", "0");
             metrics.put("reportability_gated_public_resource", "0");
+            metrics.put("reportability_gated_infrastructure_polling", "0");
             metrics.put("reportability_gated_validation_failed", "0");
+            metrics.put("reportability_gated_read_only_session_only", "0");
             metrics.put("reportability_gated_low_signal", "0");
             metrics.put("reportability_gated_reported_confirmed", "0");
             metrics.put("reportability_gated_reported_needs_review", "0");

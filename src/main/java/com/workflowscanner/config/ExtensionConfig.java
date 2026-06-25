@@ -3,6 +3,7 @@ package com.workflowscanner.config;
 import burp.api.montoya.MontoyaApi;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.workflowscanner.classification.NoiseRulesConfig;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -88,6 +89,15 @@ public class ExtensionConfig {
     // spend LLM calls on them anyway.
     private boolean analyzeReadOnlyCandidates = false;
 
+    // --- Universal Noise Rules (added in P0 quality-gate universal rework) ---
+    // Configurable rule groups for telemetry, feature-flag, public-resource,
+    // private-context, and infrastructure-cookie detection. Defaults are
+    // universal — they apply to any web target. Users can override lists
+    // for target-specific cases. The embedded config is passed to
+    // RequestClassifier, StaticNoiseRules, PrivateContextDetector, and
+    // PublicResourceClassifier at construction time.
+    private NoiseRulesConfig noiseRules = NoiseRulesConfig.withDefaults();
+
     // --- Constructors ---
 
     public ExtensionConfig() {
@@ -172,6 +182,7 @@ public class ExtensionConfig {
         this.reportLLMOnlyFindings = defaults.reportLLMOnlyFindings;
         this.reportFailedValidationHypotheses = defaults.reportFailedValidationHypotheses;
         this.analyzeReadOnlyCandidates = defaults.analyzeReadOnlyCandidates;
+        this.noiseRules = NoiseRulesConfig.withDefaults();
     }
 
     // --- Getters and Setters ---
@@ -271,4 +282,14 @@ public class ExtensionConfig {
 
     public boolean isAnalyzeReadOnlyCandidates() { return analyzeReadOnlyCandidates; }
     public void setAnalyzeReadOnlyCandidates(boolean v) { this.analyzeReadOnlyCandidates = v; }
+
+    // --- Noise Rules ---
+
+    public NoiseRulesConfig getNoiseRules() {
+        return noiseRules != null ? noiseRules : NoiseRulesConfig.withDefaults();
+    }
+
+    public void setNoiseRules(NoiseRulesConfig v) {
+        this.noiseRules = v != null ? v : NoiseRulesConfig.withDefaults();
+    }
 }

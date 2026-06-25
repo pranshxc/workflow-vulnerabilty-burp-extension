@@ -101,6 +101,28 @@ public class RelationshipDetector {
             "awsalb", "lb", "sessionid", "__cfduid", "cfid", "cftoken",
             "rememberme", "remember_me", "xsrf-token", "x-csrf-token");
 
+    // === P0-QUALITY-GATE: cookie denylist ===
+    // Anti-bot, infrastructure, and tracking cookies are present
+    // on every request/response and produce "everything correlates
+    // to everything" noise. They are NEVER considered session
+    // cookies either, but they must be filtered before the
+    // RESPONSE_CORRELATION pass as well. The ValueKind
+    // classification also catches them, but this explicit denylist
+    // is the second line of defense.
+    private static final Set<String> INFRA_COOKIE_NAMES = Set.of(
+            // Anti-bot / bot management
+            "__cf_bm", "cf_clearance", "_cfuid", "_cflb",
+            "bm_sz", "ak_bmsc", "incap_ses_", "visid_incap",
+            "reese84", "reese_script",
+            // Load balancer / routing
+            "awsalb", "awsalbcors", "awselb",
+            // Tracking (exact prefixes handled separately in
+            // extractCookieName for the wildcard ones)
+            "rl_page_init_referrer", "rl_anonymous_id", "rl_user_id",
+            "amplitude_id", "ajs_anonymous_id", "ajs_user_id",
+            "mp_", "_pxvid", "_hjSession_", "_hjAbsoluteSessionInProgress",
+            "_gcl_au", "_gcl_aw", "_gcl_dc");
+
     public RelationshipDetector(RequestGraph graph, ExtensionLogger logger) {
         this(graph, logger, 50);
     }
@@ -347,6 +369,14 @@ public class RelationshipDetector {
             String paramValue = entry.getValue() != null ? entry.getValue().toString() : null;
             if (paramValue == null || paramValue.length() < 4) continue;
 
+            // === P0-QUALITY-GATE: skip anti-bot / infra / tracking cookies ===
+            if (paramName.startsWith("cookie.") || paramName.startsWith("set-cookie.")) {
+                String cookieName = paramName.startsWith("cookie.")
+                        ? paramName.substring(7).toLowerCase()
+                        : paramName.substring(11).toLowerCase();
+                if (isInfrastructureOrTrackingCookie(cookieName)) continue;
+            }
+
             // Filter through ValueKind — only correlation-relevant values create edges
             if (!ParameterExtractor.isInterestingCorrelationValue(paramName, paramValue)) continue;
 
@@ -393,6 +423,8 @@ public class RelationshipDetector {
 
             // Skip session cookies — they don't indicate workflow relationships
             if (SESSION_COOKIE_NAMES.contains(cookieName)) continue;
+            // === P0-QUALITY-GATE: skip anti-bot / infra / tracking cookies ===
+            if (isInfrastructureOrTrackingCookie(cookieName)) continue;
 
             diagNonSessionCookiesChecked.incrementAndGet();
             String cookieValue = entry.getValue().toString();
@@ -406,6 +438,9 @@ public class RelationshipDetector {
                 if (!p.value.equals(cookieValue)) continue;
                 RequestNode existing = graph.getNode(p.nodeId);
                 if (existing == null) continue;
+                // === P0-QUALITY-GATE: cookie is anti-bot / infra / tracking ===
+                // The outer loop already filtered by isInfrastructureOrTrackingCookie,
+                // so this point is only reached for non-infrastructure cookies.
                 RequestEdge edge = new RequestEdge(
                         p.nodeId, newNode.getId(),
                         EdgeType.RESPONSE_CORRELATION, 0.85,
@@ -420,6 +455,34 @@ public class RelationshipDetector {
             }
         }
         return edges;
+    }
+
+    // === P0-QUALITY-GATE: anti-bot / infra / tracking cookie prefix match ===
+    // Used as a second line of defense in addition to the ValueKind
+    // classifier. Returns true for any cookie name that is known
+    // infrastructure noise and should not produce a workflow edge.
+    private static boolean isInfrastructureOrTrackingCookie(String cookieName) {
+        if (cookieName == null) return false;
+        if (INFRA_COOKIE_NAMES.contains(cookieName)) return true;
+        // Common anti-bot / tracking prefixes
+        if (cookieName.startsWith("__cf_")) return true;
+        if (cookieName.startsWith("cf_")) return true;
+        if (cookieName.startsWith("_cflb")) return true;
+        if (cookieName.startsWith("_ga")) return true;     // _ga, _ga_*
+        if (cookieName.startsWith("_gid")) return true;
+        if (cookieName.startsWith("_gat")) return true;
+        if (cookieName.startsWith("_px")) return true;     // _pxvid, _px*
+        if (cookieName.startsWith("_hj")) return true;     // _hjSession_*
+        if (cookieName.startsWith("amplitude_")) return true;
+        if (cookieName.startsWith("ajs_")) return true;
+        if (cookieName.startsWith("rl_")) return true;     // Rollbar
+        if (cookieName.startsWith("mp_") || cookieName.startsWith("mp2_")) return true;
+        if (cookieName.startsWith("awsalb") || cookieName.startsWith("awselb")) return true;
+        if (cookieName.startsWith("bm_sz") || cookieName.startsWith("ak_bmsc")) return true;
+        if (cookieName.startsWith("incap_") || cookieName.startsWith("visid_incap")) return true;
+        if (cookieName.startsWith("nlbi_")) return true;
+        if (cookieName.startsWith("opt_") || cookieName.startsWith("optimizely")) return true;
+        return false;
     }
 
     // ========================================================================

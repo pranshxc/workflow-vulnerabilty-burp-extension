@@ -26,11 +26,19 @@ import java.util.Set;
  * counters but is intentionally not produced by
  * RelationshipDetector — it caused noisy fake chains and is now
  * context-only.
+ *
+ * <p><b>P0-QUALITY-GATE:</b> {@link #TIME_WINDOW} is now also
+ * filtered on graph load (see {@code GraphBuilder.loadFromDirectory})
+ * and on live edge creation. The audit found 18,303 TIME_WINDOW
+ * edges in a real 1inch dataset, dominating 72% of all edges
+ * and contributing zero workflow signal. They are kept in the
+ * enum for backward compatibility with old export files but
+ * are never created or counted.
  */
 public enum EdgeType {
     REDIRECT,              // HTTP 3xx redirect chain
     REFERRER,              // Referer header points to source
-    TIME_WINDOW,           // Requests within configurable time window (deprecated; never emitted)
+    TIME_WINDOW,           // Requests within configurable time window (DEPRECATED: never emitted, dropped on load)
     PARAM_REUSE,           // Parameter value from response appears in next request
     RESPONSE_CORRELATION,  // Response body data used in subsequent request
     USER_DEFINED,          // Manually grouped by user via context menu

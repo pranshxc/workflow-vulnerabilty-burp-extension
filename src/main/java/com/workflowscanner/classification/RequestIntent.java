@@ -29,6 +29,13 @@ public enum RequestIntent {
     /** Authentication context read (e.g. /api/me, /api/user) — not a workflow step,
      *  but retained for ApplicationModel context */
     CONTEXT_READ,
+    /** Public-data lookup (price, weather, blog post, product, blockchain balance)
+     *  on a path that matches a public-resource pattern AND carries no auth/private
+     *  context. Universal — applies to any read-only public identifier. */
+    PUBLIC_DATA_LOOKUP,
+    /** Feature-flag / config / experimentation endpoint. Universal — applies
+     *  to Unleash, LaunchDarkly, Split.io, Statsig, custom /feature-flags etc. */
+    FEATURE_FLAG_CONFIG,
     /** Cannot determine intent confidently */
     UNKNOWN
 }

@@ -12,6 +12,14 @@ public enum ValueKind {
     BUSINESS_ID,
     SECURITY_TOKEN,
     SESSION_TOKEN,
+    // === P0-QUALITY-GATE: anti-bot / tracking / infra cookies ===
+    // These are set by infrastructure (Cloudflare, PerimeterX, GA,
+    // Amplitude, etc.) and are present on every request/response.
+    // They correlate everything to everything and must never
+    // create workflow edges.
+    ANTI_BOT_COOKIE,
+    TRACKING_COOKIE,
+    INFRASTRUCTURE_COOKIE,
     MONEY,
     EMAIL,
     USERNAME,
@@ -26,6 +34,43 @@ public enum ValueKind {
             "jsessionid", "phpsessid", "connect.sid", "session", "_auth",
             "access_token", "refresh_token", "sid", "token", "auth",
             "awsalb", "lb", "sessionid", "__cfduid");
+
+    // === P0-QUALITY-GATE: anti-bot / bot-management cookies ===
+    // These are set by infrastructure on every response and echoed
+    // on every request. They produce "everything correlates to
+    // everything" noise. They must never create workflow edges.
+    private static final Set<String> ANTI_BOT_COOKIE_NAMES = Set.of(
+            "__cf_bm", "cf_clearance", "_cfuid", "_cflb",
+            "bm_sz", "ak_bmsc", "akamai", "incap_ses_", "visid_incap",
+            "reese84", "reese_script", "x-ms-gateway-request-id");
+
+    // === P0-QUALITY-GATE: load-balancer / routing cookies ===
+    // Sticky-session cookies set by ALB, ELB, GCP, Azure, Cloudflare.
+    private static final Set<String> INFRASTRUCTURE_COOKIE_NAMES = Set.of(
+            "awsalb", "awsalbcors", "awselb", "alb", "elb",
+            "azw_" /* Azure Application Gateway */, "TSxxxxxx" /* F5 */,
+            "BIGipServer*", "JSESSIONID", "JSESSIONIDSSO",
+            "incap_ses_", "nlbi_", "X-Mapping-*");
+
+    // === P0-QUALITY-GATE: analytics / tracking cookies ===
+    // Google Analytics, GTM, Amplitude, Hotjar, PerimeterX, etc.
+    private static final Set<String> TRACKING_COOKIE_NAMES = Set.of(
+            "_ga", "_gid", "_gat", "_gat_gtag_*",
+            "_ga_*", "_hj*", "amplitude_id*", "amplitude_id_*",
+            "ajs_anonymous_id", "ajs_user_id", "ajs_group_id",
+            "rl_anonymous_id", "rl_user_id", "rl_page_init_referrer",
+            "_pxvid", "_px*", "_pocket_*", "_hjSession_*",
+            "_hjAbsoluteSessionInProgress", "mp_*", "mp2_*",
+            "gtm_id", "_fbp", "_fbc", "fr", "fbevents",
+            "hubspotutk", "__hssc", "__hssrc", "hssid", "hsfirstvisit",
+            "li_at", "li_sugr", "AnalyticsSyncHistory",
+            "_uetsid", "_uetvid", "_clck", "_clsk",
+            "_gcl_au", "_gcl_aw", "_gcl_dc", "_gcl_gs",
+            "wisepops", "wisepops_visits", "wisepops_session",
+            "intercom-id-*", "intercom-session-*",
+            "posthyve_*", "customer.io_*", "segment_*",
+            "optimizelyEndUserId", "optimizelyBuckets", "optimizelySegments",
+            "sentry-sid", "sentry-*", "sentrysid");
 
     // Known business ID parameter name patterns
     private static final Set<String> BUSINESS_ID_NAMES = Set.of(
@@ -85,6 +130,24 @@ public enum ValueKind {
             return SESSION_TOKEN;
         }
 
+        // === P0-QUALITY-GATE: anti-bot / infra / tracking cookies ===
+        // These are infrastructure noise. Never create workflow edges
+        // from them. Match by exact name and by cookie.X prefix.
+        String cookieName = lowerName.startsWith("cookie.")
+                ? lowerName.replace("cookie.", "")
+                : (lowerName.startsWith("set-cookie.") ? lowerName.replace("set-cookie.", "") : null);
+        if (cookieName != null) {
+            if (matchesWithWildcard(ANTI_BOT_COOKIE_NAMES, cookieName)) return ANTI_BOT_COOKIE;
+            if (matchesWithWildcard(INFRASTRUCTURE_COOKIE_NAMES, cookieName)) return INFRASTRUCTURE_COOKIE;
+            if (matchesWithWildcard(TRACKING_COOKIE_NAMES, cookieName)) return TRACKING_COOKIE;
+            if (cookieName.equals("__cf_bm") || cookieName.contains("cf_bm")) return ANTI_BOT_COOKIE;
+            if (cookieName.startsWith("_ga") || cookieName.startsWith("_gid") || cookieName.startsWith("_gat")) return TRACKING_COOKIE;
+            if (cookieName.startsWith("_px") || cookieName.startsWith("_hj")) return TRACKING_COOKIE;
+            if (cookieName.startsWith("amplitude_") || cookieName.startsWith("ajs_")) return TRACKING_COOKIE;
+            if (cookieName.startsWith("rl_") || cookieName.startsWith("mp_")) return TRACKING_COOKIE;
+            if (cookieName.startsWith("awsalb") || cookieName.startsWith("awselb")) return INFRASTRUCTURE_COOKIE;
+        }
+
         // Check low-entropy values first
         if (value.length() < 4 || LOW_ENTROPY_VALUES.contains(lowerValue)) return LOW_ENTROPY;
         if (BOOLEANISH_NAMES.contains(lowerName) && (lowerValue.equals("true") || lowerValue.equals("false") || lowerValue.equals("0") || lowerValue.equals("1"))) {
@@ -124,9 +187,33 @@ public enum ValueKind {
 
     /**
      * Whether this value kind should create graph edges via parameter reuse.
+     * === P0-QUALITY-GATE: anti-bot / tracking / infra cookies are
+     * never correlation-relevant. They correlate everything to
+     * everything because they are set on every response.
      */
     public boolean isCorrelationRelevant() {
         return this == BUSINESS_ID || this == SECURITY_TOKEN || this == MONEY || this == EMAIL;
+    }
+
+    /**
+     * Match a cookie name against a set that may contain trailing
+     * wildcards. Used by the P0 cookie denylist so pattern matches
+     * like {@code _ga_*} work.
+     */
+    private static boolean matchesWithWildcard(Set<String> patterns, String name) {
+        if (patterns == null || name == null) return false;
+        for (String p : patterns) {
+            if (p.endsWith("*")) {
+                String prefix = p.substring(0, p.length() - 1);
+                if (name.startsWith(prefix)) return true;
+            } else if (p.startsWith("*")) {
+                String suffix = p.substring(1);
+                if (name.endsWith(suffix)) return true;
+            } else {
+                if (name.equals(p)) return true;
+            }
+        }
+        return false;
     }
 
     /**

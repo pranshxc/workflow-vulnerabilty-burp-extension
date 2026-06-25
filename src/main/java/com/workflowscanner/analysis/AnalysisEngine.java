@@ -597,6 +597,12 @@ public class AnalysisEngine {
      * gate's SUPPRESS_READ_ONLY_SESSION_ONLY outcome. Both apply
      * the same rule so the user does not see LLM analyses for
      * candidates that the gate would have suppressed anyway.
+     *
+     * <p><b>Universal rework:</b> also returns true for candidates
+     * whose steps are entirely public-data lookups (price, weather,
+     * catalog, blog, blockchain balance). Even if the candidate
+     * somehow surfaces a non-read-only method, an all-public-data
+     * candidate is a low-signal hypothesis.
      */
     private static boolean isLowSignalReadOnly(WorkflowCandidate c) {
         if (c == null || c.getSteps() == null || c.getSteps().isEmpty()) {
@@ -608,6 +614,24 @@ public class AnalysisEngine {
         });
         if (!readOnly) return false;
         if (c.hasExplicitSupportingEdges()) return false;
+
+        // === Universal public-data candidate ===
+        // All steps are classified as PUBLIC_DATA_LOOKUP, or all
+        // step paths are universal public-resource patterns
+        // (price, weather, catalog, blog, blockchain balance, etc.).
+        // We do NOT require the classification — at the
+        // candidate-build step the per-request intent may not have
+        // been set yet. Path-based check is sufficient.
+        boolean allPublicResource = c.getSteps().stream().allMatch(n -> {
+            String path = n.getPath();
+            if (path == null) return false;
+            com.workflowscanner.classification.StaticNoiseRules rules =
+                    new com.workflowscanner.classification.StaticNoiseRules(
+                            com.workflowscanner.classification.NoiseRulesConfig.withDefaults());
+            return rules.isPublicResourcePath(path);
+        });
+        if (allPublicResource) return true;
+
         // Critical workflow types are not low-signal even if read-only.
         com.workflowscanner.workflow.WorkflowType t = c.getWorkflowType();
         if (t != null) {
