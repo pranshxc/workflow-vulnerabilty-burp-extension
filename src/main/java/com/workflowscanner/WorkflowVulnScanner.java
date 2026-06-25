@@ -21,6 +21,8 @@ import com.workflowscanner.llm.LLMClient;
 import com.workflowscanner.analysis.AnalysisEngine;
 import com.workflowscanner.validation.ValidationEngine;
 import com.workflowscanner.advisory.AdvisoryManager;
+import com.workflowscanner.store.RequestStore;
+import com.workflowscanner.store.H2RequestStore;
 import com.workflowscanner.ui.MainTabPanel;
 import com.workflowscanner.workflow.WorkflowDetector;
 import com.workflowscanner.workflow.WorkflowCandidate;
@@ -70,6 +72,8 @@ public class WorkflowVulnScanner implements BurpExtension {
     private AdvisoryManager advisoryManager;
     private BackfillService backfillService;
     private HealthCheck healthCheck;
+    // Disk-backed request store. Opened at startup, closed at shutdown.
+    private RequestStore requestStore;
     private MainTabPanel mainTabPanel;
     private WorkflowDetector workflowDetector;
     private ApplicationModel applicationModel;
@@ -94,48 +98,53 @@ public class WorkflowVulnScanner implements BurpExtension {
         // 3. Event bus (before subsystems that publish/subscribe)
         initEventBus();
 
-        // 4. Graph data store
+        // 4. Disk-backed request store (H2 MVStore). Must be open
+        //    before any component that wants to call getRequestStore()
+        //    (e.g. HealthCheck, the eventual streaming backfill).
+        initRequestStore();
+
+        // 5. Graph data store
         initGraph();
 
-        // 5. Request pipeline + backfill service
+        // 6. Request pipeline + backfill service
         initRequestPipeline();
 
-        // 6. Application model — created BEFORE the graph builder starts so
+        // 7. Application model — created BEFORE the graph builder starts so
         //    that any traffic arriving during the startup gap is not silently
         //    dropped (context reads, JS-discovered endpoints).
         initApplicationModel();
 
-        // 7. Start graph builder (pipeline -> graph)
+        // 8. Start graph builder (pipeline -> graph)
         startGraphBuilder();
 
-        // 8. LLM client
+        // 9. LLM client
         initLLMClient();
 
-        // 9. Analysis engine (wires workflowDetector into graph + analysisEngine)
+        // 10. Analysis engine (wires workflowDetector into graph + analysisEngine)
         initAnalysisEngine();
 
-        // 10. Validation engine
+        // 11. Validation engine
         initValidationEngine();
 
-        // 11. Advisory manager
+        // 12. Advisory manager
         initAdvisoryManager();
 
-        // 12. Wire the full pipeline via event bus
+        // 13. Wire the full pipeline via event bus
         wirePipeline();
 
-        // 13. UI panels
+        // 14. UI panels
         initUI();
 
-        // 14. HTTP handler (live proxy traffic)
+        // 15. HTTP handler (live proxy traffic)
         initHttpHandler();
 
-        // 15. Context menu
+        // 16. Context menu
         initContextMenu();
 
-        // 16. Health check
+        // 17. Health check
         initHealthCheck();
 
-        // 17. Register unload handler
+        // 18. Register unload handler
         api.extension().registerUnloadingHandler(new ShutdownHandler());
 
         logger.log(LogCategory.EXTENSION, LogLevel.INFO, "WorkflowVulnScanner",
@@ -204,6 +213,26 @@ public class WorkflowVulnScanner implements BurpExtension {
             logger.log(LogCategory.ERROR, LogLevel.ERROR, "WorkflowVulnScanner",
                     "Failed to initialize event bus.", e);
             this.eventBus = new EventBus(logger);
+        }
+    }
+
+    private void initRequestStore() {
+        try {
+            String graphDir = config.getGraphDataDirectory();
+            String storePath = null;
+            if (graphDir != null && !graphDir.isEmpty()) {
+                storePath = graphDir + java.io.File.separator + "requests.mv";
+            }
+            this.requestStore = new H2RequestStore(storePath);
+            logger.log(LogCategory.EXTENSION, LogLevel.INFO, "WorkflowVulnScanner",
+                    "Request store opened at " + (storePath == null
+                            ? "(in-memory)" : storePath)
+                            + " — existing records: " + requestStore.countAll());
+        } catch (Exception e) {
+            logger.log(LogCategory.ERROR, LogLevel.ERROR, "WorkflowVulnScanner",
+                    "Failed to open request store, falling back to in-memory.", e);
+            // Last-resort: an in-memory MVStore. Bounded only by heap.
+            this.requestStore = new H2RequestStore(null);
         }
     }
 
@@ -318,6 +347,11 @@ public class WorkflowVulnScanner implements BurpExtension {
     private void initValidationEngine() {
         try {
             this.validationEngine = new ValidationEngine(api, config, logger);
+            // Publish strict / probable counts to the workflow
+            // detector so the status bar can show them in O(1).
+            if (workflowDetector != null) {
+                validationEngine.setMetricsSink(workflowDetector);
+            }
             logger.log(LogCategory.EXTENSION, LogLevel.INFO, "WorkflowVulnScanner",
                     "Validation engine initialized.");
         } catch (Exception e) {
@@ -467,6 +501,9 @@ public class WorkflowVulnScanner implements BurpExtension {
         try {
             this.healthCheck = new HealthCheck(logger, pipeline, graphBuilder, graph,
                     llmClient, analysisEngine);
+            if (requestStore != null) {
+                healthCheck.setRequestStore(requestStore);
+            }
             healthCheck.start(60); // Check every 60 seconds
             logger.log(LogCategory.EXTENSION, LogLevel.INFO, "WorkflowVulnScanner",
                     "Health check started (60s interval).");
@@ -486,6 +523,7 @@ public class WorkflowVulnScanner implements BurpExtension {
     public EventBus getEventBus() { return eventBus; }
     public RequestGraph getGraph() { return graph; }
     public RequestPipeline getPipeline() { return pipeline; }
+    public RequestStore getRequestStore() { return requestStore; }
     public BackfillService getBackfillService() { return backfillService; }
     public LLMClient getLlmClient() { return llmClient; }
     public AnalysisEngine getAnalysisEngine() { return analysisEngine; }
@@ -545,7 +583,12 @@ public class WorkflowVulnScanner implements BurpExtension {
             // 9. Save configuration
             shutdown("Config", () -> { if (config != null) config.save(api); });
 
-            // 10. Flush and shutdown logs (last)
+            // 10. Close the disk-backed request store
+            shutdown("RequestStore", () -> {
+                if (requestStore != null) requestStore.close();
+            });
+
+            // 11. Flush and shutdown logs (last)
             if (logger != null) {
                 try {
                     logger.flush();

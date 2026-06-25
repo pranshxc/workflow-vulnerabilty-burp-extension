@@ -11,6 +11,7 @@ import com.workflowscanner.llm.SuggestedTest;
 import com.workflowscanner.logging.ExtensionLogger;
 import com.workflowscanner.logging.LogCategory;
 import com.workflowscanner.logging.LogLevel;
+import com.workflowscanner.workflow.WorkflowDetector;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -47,6 +48,11 @@ public class ValidationEngine {
     private final ExtensionLogger logger;
     private final RequestReplayer replayer;
     private final ScopeFilter scopeFilter;
+    // Optional sink for live status counters. When set, every
+    // validate() call publishes the latest strict / probable counts
+    // so the status panel can show "findings: 3 confirmed / 7 probable"
+    // without re-scanning all results.
+    private volatile WorkflowDetector metricsSink;
 
     private final AtomicBoolean dryRunMode = new AtomicBoolean(false);
     private final AtomicBoolean allowDestructiveTests = new AtomicBoolean(false);
@@ -127,6 +133,16 @@ public class ValidationEngine {
         logger.log(LogCategory.ANALYSIS, LogLevel.INFO, "ValidationEngine",
                 "Validation complete for chain " + verdict.getChainId()
                         + ": " + results.size() + " tests, " + confirmed + " confirmed.");
+
+        // Publish live confirmed/probable counts to the metrics sink
+        // so the status panel can show them without re-scanning.
+        if (metricsSink != null) {
+            metricsSink.setLiveValidationCounts(
+                    getStrictConfirmedCount(),
+                    (int) allResults.stream()
+                            .filter(ValidationResult::isConfirmed)
+                            .count() - getStrictConfirmedCount());
+        }
 
         return results;
     }
@@ -746,6 +762,16 @@ public class ValidationEngine {
 
     public void setAllowDestructiveTests(boolean allow) { this.allowDestructiveTests.set(allow); }
     public boolean isAllowDestructiveTests() { return allowDestructiveTests.get(); }
+
+    /**
+     * Set a sink for live validation counts. The validation engine
+     * publishes strict-confirmed and probable counts to the sink
+     * after every {@link #validate(ChainVerdict)} call so the status
+     * panel can show them in O(1).
+     */
+    public void setMetricsSink(WorkflowDetector detector) {
+        this.metricsSink = detector;
+    }
 
     public void setReplayDelayMs(int delayMs) { this.replayDelayMs = delayMs; }
     public int getReplayDelayMs() { return replayDelayMs; }

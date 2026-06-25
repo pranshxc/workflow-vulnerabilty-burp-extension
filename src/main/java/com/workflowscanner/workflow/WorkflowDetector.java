@@ -50,6 +50,14 @@ public class WorkflowDetector {
     private volatile int liveCandidateCount = 0;
     private volatile int liveEdgeSupportedCount = 0;
     private volatile int liveSessionOnlyCount = 0;
+    private volatile int liveAnalysisReadyCount = 0;
+    private volatile int liveDisplayOnlyCount = 0;
+    // The "confirmed" and "probable" counters reflect the strict /
+    // loose proof counts on the most recent validation run. They are
+    // updated by the validation engine via
+    // {@link #setLiveValidationCounts(int, int)}.
+    private volatile int liveConfirmedCount = 0;
+    private volatile int liveProbableCount = 0;
 
     // De-duplication: when the same candidate is observed across multiple
     // detection runs, listeners should not be invoked again. The fingerprint
@@ -744,20 +752,63 @@ public class WorkflowDetector {
     public int getLiveSessionOnlyCount() { return liveSessionOnlyCount; }
 
     /**
+     * Live analysis-ready candidate count (score &gt;= analysis
+     * threshold), updated alongside {@link #getLiveCandidateCount()}.
+     */
+    public int getLiveAnalysisReadyCount() { return liveAnalysisReadyCount; }
+
+    /**
+     * Live display-only candidate count (display threshold &lt;= score
+     * &lt; analysis threshold), updated alongside
+     * {@link #getLiveCandidateCount()}.
+     */
+    public int getLiveDisplayOnlyCount() { return liveDisplayOnlyCount; }
+
+    /**
+     * Live count of strictly-confirmed validation results across the
+     * most recent validation run. Updated by the validation engine
+     * via {@link #setLiveValidationCounts(int, int)}.
+     */
+    public int getLiveConfirmedCount() { return liveConfirmedCount; }
+
+    /**
+     * Live count of probable validation results (strict proof not
+     * observed). Updated by the validation engine.
+     */
+    public int getLiveProbableCount() { return liveProbableCount; }
+
+    /**
+     * Set the latest confirmed / probable validation counts. Called
+     * by the validation engine after each run so the status panel
+     * can show how many findings are strict vs needing review.
+     */
+    public void setLiveValidationCounts(int confirmed, int probable) {
+        this.liveConfirmedCount = Math.max(0, confirmed);
+        this.liveProbableCount = Math.max(0, probable);
+    }
+
+    /**
      * Recompute and cache the live counters from a candidate list.
      * Called by both preview and full-detect paths.
      */
     private void updateLiveMetrics(List<WorkflowCandidate> candidates) {
         int total = candidates.size();
         int edge = 0;
+        int ready = 0;
+        double analysisThreshold = config.getWorkflowScoreThreshold();
         for (WorkflowCandidate c : candidates) {
             if (c.getSupportingEdges() != null && !c.getSupportingEdges().isEmpty()) {
                 edge++;
+            }
+            if (c.getWorkflowScore() >= analysisThreshold) {
+                ready++;
             }
         }
         this.liveCandidateCount = total;
         this.liveEdgeSupportedCount = edge;
         this.liveSessionOnlyCount = total - edge;
+        this.liveAnalysisReadyCount = ready;
+        this.liveDisplayOnlyCount = total - ready;
     }
 
     public void addCandidateListener(Consumer<WorkflowCandidate> listener) {
@@ -771,6 +822,10 @@ public class WorkflowDetector {
         liveCandidateCount = 0;
         liveEdgeSupportedCount = 0;
         liveSessionOnlyCount = 0;
+        liveAnalysisReadyCount = 0;
+        liveDisplayOnlyCount = 0;
+        liveConfirmedCount = 0;
+        liveProbableCount = 0;
     }
 
     public WorkflowSessionizer getSessionizer() { return sessionizer; }

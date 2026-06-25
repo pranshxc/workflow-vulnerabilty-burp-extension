@@ -8,6 +8,7 @@ import com.workflowscanner.llm.LLMClient;
 import com.workflowscanner.logging.ExtensionLogger;
 import com.workflowscanner.logging.LogCategory;
 import com.workflowscanner.logging.LogLevel;
+import com.workflowscanner.store.RequestStore;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -27,6 +28,9 @@ public class HealthCheck {
     private final RequestGraph graph;
     private final LLMClient llmClient;
     private final AnalysisEngine analysisEngine;
+    // Optional. Set when the disk-backed store is wired in (Commit 2).
+    // When null, the stored-requests metric keys read 0.
+    private volatile RequestStore requestStore;
 
     private ScheduledExecutorService scheduler;
     private volatile Map<String, SubsystemStatus> lastStatus = new LinkedHashMap<>();
@@ -40,6 +44,15 @@ public class HealthCheck {
         this.graph = graph;
         this.llmClient = llmClient;
         this.analysisEngine = analysisEngine;
+    }
+
+    /**
+     * Set the disk-backed request store. Wired in by the application
+     * bootstrap once the store is opened. When unset, the
+     * {@code stored_*} metric keys read 0.
+     */
+    public void setRequestStore(RequestStore store) {
+        this.requestStore = store;
     }
 
     /**
@@ -178,11 +191,46 @@ public class HealthCheck {
             }
         }
 
+        // Stored-requests counters from the disk-backed RequestStore.
+        // Until Commit 2 wires the H2 implementation, these read 0.
+        if (requestStore != null) {
+            metrics.put("stored_requests", String.valueOf(requestStore.countAll()));
+            metrics.put("stored_workflow_relevant", String.valueOf(requestStore.countWorkflowRelevant()));
+            metrics.put("stored_with_raw", String.valueOf(requestStore.countWithRaw()));
+            metrics.put("stored_disk_bytes", String.valueOf(requestStore.diskBytes()));
+        } else {
+            metrics.put("stored_requests", "0");
+            metrics.put("stored_workflow_relevant", "0");
+            metrics.put("stored_with_raw", "0");
+            metrics.put("stored_disk_bytes", "0");
+        }
+
         // Diagnostic: zero edges with non-zero candidates usually means
         // edge building never ran (backfill-only project, edge index
         // rebuild required, etc.). Surface it as an explicit key.
         boolean edgeMissing = edgeCount == 0 && candidateCount > 0;
         metrics.put("edges_no_candidate_warning", edgeMissing ? "1" : "0");
+
+        // Live validation counts from the workflow detector.
+        int confirmedCount = 0;
+        int probableCount = 0;
+        if (graph != null && graph.getWorkflowDetector() != null) {
+            com.workflowscanner.workflow.WorkflowDetector det = graph.getWorkflowDetector();
+            confirmedCount = det.getLiveConfirmedCount();
+            probableCount = det.getLiveProbableCount();
+        }
+        metrics.put("confirmed_count", String.valueOf(confirmedCount));
+        metrics.put("probable_count", String.valueOf(probableCount));
+
+        // Analysis-ready vs display-only candidate split (live).
+        int analysisReady = 0;
+        int displayOnly = 0;
+        if (graph != null && graph.getWorkflowDetector() != null) {
+            analysisReady = graph.getWorkflowDetector().getLiveAnalysisReadyCount();
+            displayOnly = graph.getWorkflowDetector().getLiveDisplayOnlyCount();
+        }
+        metrics.put("analysis_ready_candidates", String.valueOf(analysisReady));
+        metrics.put("display_only_candidates", String.valueOf(displayOnly));
 
         metrics.put("analyzed_chains", analysisEngine != null ? String.valueOf(analysisEngine.getCompletedCandidates()) : "?");
         metrics.put("findings_count", analysisEngine != null ? String.valueOf(analysisEngine.getTotalFindings()) : "?");

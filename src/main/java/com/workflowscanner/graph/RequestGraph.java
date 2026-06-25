@@ -15,7 +15,7 @@ import java.util.Map;
 import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -32,7 +32,14 @@ import java.util.stream.Collectors;
 public class RequestGraph {
 
     private final Map<String, RequestNode> nodes = new ConcurrentHashMap<>();
-    private final List<RequestEdge> edges = new CopyOnWriteArrayList<>();
+    /**
+     * Edges stored in a {@link ConcurrentLinkedQueue} so that backfill
+     * (millions of {@code addEdge} calls) does not pay the per-write
+     * array-copy cost of {@code CopyOnWriteArrayList}. Iteration is
+     * still O(n) but cheap, and the queue is unbounded so it does not
+     * reject writes.
+     */
+    private final Queue<RequestEdge> edges = new ConcurrentLinkedQueue<>();
     private volatile int nextNodeIndex = 0;
 
     // Monotonic version counter. Incremented on every structural mutation
@@ -55,9 +62,12 @@ public class RequestGraph {
         }
     }
 
-    // Adjacency lists for efficient traversal
-    private final Map<String, List<String>> outgoing = new ConcurrentHashMap<>(); // nodeId -> [targetIds]
-    private final Map<String, List<String>> incoming = new ConcurrentHashMap<>(); // nodeId -> [sourceIds]
+    // Adjacency lists for efficient traversal. Values are queues
+    // (not lists) so backfill does not pay array-copy cost. The
+    // BFS in getConnectedComponents() iterates the queue, which
+    // is allowed.
+    private final Map<String, Queue<String>> outgoing = new ConcurrentHashMap<>(); // nodeId -> targetIds
+    private final Map<String, Queue<String>> incoming = new ConcurrentHashMap<>(); // nodeId -> sourceIds
 
     // Optional reference for enriching graph stats with candidate counts
     private volatile WorkflowDetector workflowDetector;
@@ -68,8 +78,8 @@ public class RequestGraph {
     public synchronized RequestNode addNode(RequestNode node) {
         boolean wasNew = !nodes.containsKey(node.getId());
         nodes.put(node.getId(), node);
-        outgoing.putIfAbsent(node.getId(), new CopyOnWriteArrayList<>());
-        incoming.putIfAbsent(node.getId(), new CopyOnWriteArrayList<>());
+        outgoing.putIfAbsent(node.getId(), new ConcurrentLinkedQueue<>());
+        incoming.putIfAbsent(node.getId(), new ConcurrentLinkedQueue<>());
         if (wasNew) {
             // Maintain O(1) workflow-relevant counter. If the new
             // node replaces an existing one of the same id, do not
@@ -91,9 +101,9 @@ public class RequestGraph {
         if (typeCounter != null) {
             typeCounter.incrementAndGet();
         }
-        outgoing.computeIfAbsent(edge.getSourceNodeId(), k -> new CopyOnWriteArrayList<>())
+        outgoing.computeIfAbsent(edge.getSourceNodeId(), k -> new ConcurrentLinkedQueue<>())
                 .add(edge.getTargetNodeId());
-        incoming.computeIfAbsent(edge.getTargetNodeId(), k -> new CopyOnWriteArrayList<>())
+        incoming.computeIfAbsent(edge.getTargetNodeId(), k -> new ConcurrentLinkedQueue<>())
                 .add(edge.getSourceNodeId());
         graphVersion++;
     }
@@ -106,8 +116,15 @@ public class RequestGraph {
         return Collections.unmodifiableMap(nodes);
     }
 
-    public List<RequestEdge> getEdges() {
-        return Collections.unmodifiableList(edges);
+    /**
+     * Live edges. Backed by a {@link ConcurrentLinkedQueue} so
+     * backfill does not pay array-copy cost. Returns a
+     * {@code Collection} (not {@code List}) because the underlying
+     * storage is a queue. Callers that need a stable list should
+     * snapshot it themselves.
+     */
+    public java.util.Collection<RequestEdge> getEdges() {
+        return edges;
     }
 
     // --- Filtering ---
@@ -176,7 +193,7 @@ public class RequestGraph {
                 }
 
                 // Follow outgoing edges
-                List<String> targets = outgoing.get(current);
+                Queue<String> targets = outgoing.get(current);
                 if (targets != null) {
                     for (String target : targets) {
                         if (visited.add(target)) {
@@ -186,7 +203,7 @@ public class RequestGraph {
                 }
 
                 // Follow incoming edges
-                List<String> sources = incoming.get(current);
+                Queue<String> sources = incoming.get(current);
                 if (sources != null) {
                     for (String source : sources) {
                         if (visited.add(source)) {
@@ -327,6 +344,21 @@ public class RequestGraph {
         return snap;
     }
 
+    /**
+     * <b>DO NOT CALL FROM UI TIMERS OR BACKFILL.</b>
+     *
+     * <p>Returns the number of connected components by doing a full
+     * BFS over the graph. This is O(n) on a 1.6M-node graph and can
+     * freeze Burp. The status panel uses
+     * {@link #getComponentCountOnDemand()} only when explicitly
+     * requested by a user action.
+     *
+     * <p>This method is kept for back-compat with any caller that
+     * genuinely needs the cheap-looking API. New code should use
+     * the workflow detector's live counters for candidate counts,
+     * and {@link #getComponentCountOnDemand()} when connected
+     * components are actually needed.
+     */
     public int getChainCount() {
         return getConnectedComponents().size();
     }

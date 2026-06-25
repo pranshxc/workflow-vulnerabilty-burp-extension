@@ -98,28 +98,32 @@ public class StatusBarPanel extends JPanel {
             String nodes = metrics.getOrDefault("graph_nodes", "?");
             String edges = metrics.getOrDefault("graph_edges", "?");
             String relevant = metrics.getOrDefault("workflow_relevant_requests", "?");
+            String storedReq = metrics.getOrDefault("stored_requests", "0");
             graphLabel.setText("Graph: " + nodes + "n/" + edges
-                    + "e (relevant: " + relevant + ")");
+                    + "e (relevant: " + relevant + ", stored: " + storedReq + ")");
 
             String candidates = metrics.getOrDefault("workflow_candidates", "?");
             String edgeSupp = metrics.getOrDefault("edge_supported_candidates", "?");
             String sessionOnly = metrics.getOrDefault("session_only_candidates", "?");
+            String analysisReady = metrics.getOrDefault("analysis_ready_candidates", "?");
+            String displayOnly = metrics.getOrDefault("display_only_candidates", "?");
             candidatesLabel.setText("Candidates: " + candidates);
-            // Append a short edge-by-type breakdown so the user can
-            // see which edge types are present without a full settings
-            // panel view. Format: "P/Rd/Rf/C/U" where P=PARAM_REUSE,
-            // Rd=REDIRECT, Rf=REFERRER, C=RESPONSE_CORRELATION, U=USER_DEFINED.
+            // Format: "(edge:N session:N) [P:N Rd:N Rf:N C:N U:N] (ready:N display:N)"
             String p = metrics.getOrDefault("edges_by_type_PARAM_REUSE", "0");
             String rd = metrics.getOrDefault("edges_by_type_REDIRECT", "0");
             String rf = metrics.getOrDefault("edges_by_type_REFERRER", "0");
             String c = metrics.getOrDefault("edges_by_type_RESPONSE_CORRELATION", "0");
             String u = metrics.getOrDefault("edges_by_type_USER_DEFINED", "0");
             edgesBreakdownLabel.setText(" (edge: " + edgeSupp + ", session: " + sessionOnly
-                    + ") [P:" + p + " Rd:" + rd + " Rf:" + rf + " C:" + c + " U:" + u + "]");
+                    + ") [P:" + p + " Rd:" + rd + " Rf:" + rf + " C:" + c + " U:" + u + "]"
+                    + " (ready:" + analysisReady + " display:" + displayOnly + ")");
 
             String analyzed = metrics.getOrDefault("analyzed_chains", "?");
             String findings = metrics.getOrDefault("findings_count", "?");
-            findingsLabel.setText("Findings: " + findings + "/" + analyzed);
+            String confirmed = metrics.getOrDefault("confirmed_count", "0");
+            String probable = metrics.getOrDefault("probable_count", "0");
+            findingsLabel.setText("Findings: " + findings + " (conf:" + confirmed
+                    + " prob:" + probable + ")/" + analyzed);
 
             String llmErrors = metrics.getOrDefault("llm_errors", "0");
             String replayErrors = metrics.getOrDefault("replay_errors", "0");
