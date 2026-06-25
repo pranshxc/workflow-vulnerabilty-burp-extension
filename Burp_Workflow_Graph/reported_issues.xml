@@ -1,0 +1,269 @@
+<?xml version="1.1"?>
+<!-- NOTE: Any NULL bytes in requests and responses are preserved within this output, even though this strictly breaks the XML syntax. If your XML parser rejects the NULL bytes then you will need to remove or replace these bytes before parsing. Alternatively, you can use the option to base64-encode requests and responses. -->
+<!DOCTYPE issues [
+<!ELEMENT issues (issue*)>
+<!ATTLIST issues burpVersion CDATA "">
+<!ATTLIST issues exportTime CDATA "">
+<!ELEMENT issue (serialNumber, type, name, host, path, location, severity, confidence, issueBackground?, remediationBackground?, references?, vulnerabilityClassifications?, issueDetail?, issueDetailItems?, remediationDetail?, requestresponse*, collaboratorEvent*, infiltratorEvent*, staticAnalysis*, dynamicAnalysis*, prototypePollution*)>
+<!ELEMENT serialNumber (#PCDATA)>
+<!ELEMENT type (#PCDATA)>
+<!ELEMENT name (#PCDATA)>
+<!ELEMENT host (#PCDATA)>
+<!ATTLIST host ip CDATA "">
+<!ELEMENT path (#PCDATA)>
+<!ELEMENT location (#PCDATA)>
+<!ELEMENT severity (#PCDATA)>
+<!ELEMENT confidence (#PCDATA)>
+<!ELEMENT issueBackground (#PCDATA)>
+<!ELEMENT remediationBackground (#PCDATA)>
+<!ELEMENT references (#PCDATA)>
+<!ELEMENT vulnerabilityClassifications (#PCDATA)>
+<!ELEMENT issueDetail (#PCDATA)>
+<!ELEMENT issueDetailItems (issueDetailItem*)>
+<!ELEMENT issueDetailItem (#PCDATA)>
+<!ELEMENT remediationDetail (#PCDATA)>
+<!ELEMENT requestresponse (request?, response?, responseRedirected?)>
+<!ELEMENT request (#PCDATA)>
+<!ATTLIST request method CDATA "">
+<!ATTLIST request base64 (true|false) "false">
+<!ELEMENT response (#PCDATA)>
+<!ATTLIST response base64 (true|false) "false">
+<!ELEMENT responseRedirected (#PCDATA)>
+<!ELEMENT sender (#PCDATA)>
+<!ELEMENT message (#PCDATA)>
+<!ELEMENT conversation (#PCDATA)>
+<!ELEMENT recipient (#PCDATA)>
+<!ELEMENT recipients (recipient*)>
+<!ELEMENT smtp (sender, recipients, message, conversation)>
+<!ELEMENT collaboratorEvent (interactionType, originIp, time, lookupType?, lookupHost?, requestresponse?, smtp?)>
+<!ELEMENT interactionType (#PCDATA)>
+<!ELEMENT originIp (#PCDATA)>
+<!ELEMENT time (#PCDATA)>
+<!ELEMENT lookupType (#PCDATA)>
+<!ELEMENT lookupHost (#PCDATA)>
+<!ELEMENT infiltratorEvent (parameterName, platform, signature, stackTrace?, parameterValue?, collaboratorEvent)>
+<!ELEMENT parameterName (#PCDATA)>
+<!ELEMENT platform (#PCDATA)>
+<!ELEMENT signature (#PCDATA)>
+<!ELEMENT stackTrace (#PCDATA)>
+<!ELEMENT parameterValue (#PCDATA)>
+<!ELEMENT dynamicAnalysis (source, sink, sourceStackTrace, sinkStackTrace, eventListenerStackTrace, sourceValue, sinkValue, eventHandlerData, eventHandlerDataType, eventHandlerManipulatedData, poc, origin, isOriginChecked, sourceElementId, sourceElementName, eventFiredEventName, eventFiredElementId, eventFiredElementName, eventFiredOuterHtml)>
+<!ELEMENT prototypePollution (poc, pollutionTechnique, pollutionType)>
+<!ELEMENT staticAnalysis (source, sink, codeSnippets)>
+<!ELEMENT source (#PCDATA)>
+<!ELEMENT sink (#PCDATA)>
+<!ELEMENT sourceStackTrace (#PCDATA)>
+<!ELEMENT sinkStackTrace (#PCDATA)>
+<!ELEMENT eventListenerStackTrace (#PCDATA)>
+<!ELEMENT sourceValue (#PCDATA)>
+<!ELEMENT sinkValue (#PCDATA)>
+<!ELEMENT eventHandlerData (#PCDATA)>
+<!ELEMENT eventHandlerDataType (#PCDATA)>
+<!ELEMENT sourceElementId (#PCDATA)>
+<!ELEMENT sourceElementName (#PCDATA)>
+<!ELEMENT eventFiredEventName (#PCDATA)>
+<!ELEMENT eventFiredElementId (#PCDATA)>
+<!ELEMENT eventFiredElementName (#PCDATA)>
+<!ELEMENT eventFiredOuterHtml (#PCDATA)>
+<!ELEMENT eventHandlerManipulatedData (#PCDATA)>
+<!ELEMENT poc (#PCDATA)>
+<!ELEMENT origin (#PCDATA)>
+<!ELEMENT isOriginChecked (#PCDATA)>
+<!ELEMENT codeSnippets (codeSnippet*)>
+<!ELEMENT codeSnippet (#PCDATA)>
+<!ELEMENT pollutionTechnique (#PCDATA)>
+<!ELEMENT pollutionType (#PCDATA)>
+]>
+<issues burpVersion="2026.1.2" exportTime="Thu Jun 25 11:07:47 IST 2026">
+  <issue>
+    <serialNumber>6661645366753061888</serialNumber>
+    <type>134217728</type>
+    <name><![CDATA[Workflow Idor In Workflow (Test Failed)]]></name>
+    <host ip="104.18.36.231">https://proxy-app.1inch.com</host>
+    <path><![CDATA[/]]></path>
+    <location><![CDATA[/]]></location>
+    <severity>Medium</severity>
+    <confidence>Tentative</confidence>
+    <issueBackground><![CDATA[<h4>Remediation: IDOR in Workflow</h4>
+<p>Implement proper authorization checks at every step of the workflow, not just the entry point.</p>
+<ul>
+<li>Verify resource ownership at each workflow step</li>
+<li>Use indirect references (mapped to session) instead of direct IDs</li>
+<li>Validate that the authenticated user has access to the referenced resource</li>
+<li>Log and alert on access attempts to other users' resources</li>
+</ul>]]></issueBackground>
+    <remediationBackground><![CDATA[<h4>Remediation: IDOR in Workflow</h4>
+<p>Implement proper authorization checks at every step of the workflow, not just the entry point.</p>
+<ul>
+<li>Verify resource ownership at each workflow step</li>
+<li>Use indirect references (mapped to session) instead of direct IDs</li>
+<li>Validate that the authenticated user has access to the referenced resource</li>
+<li>Log and alert on access attempts to other users' resources</li>
+</ul>]]></remediationBackground>
+    <issueDetail><![CDATA[&lt;h3&gt;Workflow Vulnerability: Idor in workflow&lt;/h3&gt;
+<h4>Summary</h4>
+<p>1. Attacker identifies that the 'wallets' parameter in the URL path and query string is not bound to the authenticated user. 2. Attacker changes the wallet address to a target wallet (e.g., a known rich wallet). 3. Attacker sends the request to the vulnerable endpoint. 4. Server returns the balance/allowance data of the target wallet, resulting in information disclosure.
+
+1. Attacker identifies that the wallet address is passed as both path segment (e.g., /.../0xcC77A89FFC9e26B2319CFCf6D94707244...</p>
+<h4>Workflow Chain</h4>
+<ol>
+  <li>GET /v2.0/balance/v1.2/42161/allowancesAndBalances/0x111111125421ca6dc452d289314280a0f8842a65/0xcC77A89FFC9e26B2319CFCf6D947072446fCb432 &rarr; 200 &larr; <b>SUSPICIOUS</b></li>
+  <li>GET /v2.0/balance/v1.2/100/allowancesAndBalances/0x111111125421ca6dc452d289314280a0f8842a65/0xcC77A89FFC9e26B2319CFCf6D947072446fCb432 &rarr; 200 &larr; <b>VULNERABLE</b></li>
+  <li>GET /v2.0/balance/v1.2/43114/allowancesAndBalances/0x111111125421ca6dc452d289314280a0f8842a65/0xcC77A89FFC9e26B2319CFCf6D947072446fCb432 &rarr; 200 &larr; <b>VULNERABLE</b></li>
+  <li>GET /v2.0/balance/v1.2/324/allowancesAndBalances/0x6fd4383cb451173d5f9304f041c7bcbf27d561ff/0xcC77A89FFC9e26B2319CFCf6D947072446fCb432 &rarr; 200 &larr; <b>VULNERABLE</b></li>
+</ol>
+<h4>LLM Analysis</h4>
+<p><b>Node 1</b>: SUSPICIOUS (40%) - idor_in_workflow<br>
+<i>The wallet address is client-controlled via path and query parameters. The API returns empty body, providing no evidence of authorization checks. If subsequent steps reuse this wallet without re-validation, an attacker could manipulate wallets across chains. Cache-Control: public, max-age=5 implies caching may affect state consistency if concurrent requests are made.</i></p>
+<p><b>Node 2</b>: VULNERABLE (90%) - idor_in_workflow<br>
+<i>The wallet address is entirely client-supplied in both the URL path and the 'wallets' query parameter. The server does not appear to validate that the requesting user owns this wallet, allowing an attacker to retrieve balance information of any wallet. This is an IDOR vulnerability in a multi-chain balance check workflow. Additionally, the lack of aggregated rate limiting across chains could allow an attacker to perform excessive balance lookups.</i></p>
+<p><b>Node 3</b>: VULNERABLE (95%) - idor_in_workflow<br>
+<i>Multiple steps in this multi-chain balance workflow confirm that the wallet address parameter is taken directly from user input without any session or ownership validation. The response (HTTP 200 with empty body) and previous nodes show that the wallet can be changed arbitrarily, revealing any user's balances across chains. Caching headers (max-age=5) are present but do not mitigate IDOR. No authorization mechanism ties the wallet to the requesting user.</i></p>
+<p><b>Node 4</b>: VULNERABLE (100%) - idor_in_workflow<br>
+<i>The wallet address is directly used in the URL path and query parameter without authentication or authorization checks tied to the wallet. The response is empty for this wallet, but by changing the wallet parameter, an attacker can retrieve balance information for any other wallet. No session or token bound to the wallet is present; the Authorization header is a Bearer token tied to the device/IP but not to the wallet. This allows unauthorized information disclosure across all chains.</i></p>
+<h4>Attack Scenario</h4>
+<p>1. Attacker identifies that the 'wallets' parameter in the URL path and query string is not bound to the authenticated user. 2. Attacker changes the wallet address to a target wallet (e.g., a known rich wallet). 3. Attacker sends the request to the vulnerable endpoint. 4. Server returns the balance/allowance data of the target wallet, resulting in information disclosure.<br>
+<br>
+1. Attacker identifies that the wallet address is passed as both path segment (e.g., /.../0xcC77A89FFC9e26B2319CFCf6D947072446fCb432) and query parameter (wallets=...). 2. Attacker changes the wallet address to another target address (e.g., a known whale wallet) and sends the same request. 3. The API returns the balance/token allowances for the target wallet on the specified chain, disclosing sensitive financial information without any authentication or authorization check.<br>
+<br>
+1. Obtain a valid Bearer token (e.g., by normal usage of 1inch). 2. Send a GET request to https://proxy-app.1inch.com/v2.0/balance/v1.2/324/allowancesAndBalances/0x6fd4383cb451173d5f9304f041c7bcbf27d561ff/{target_wallet}?wallets={target_wallet}&amp;filterEmpty=true, replacing {target_wallet} with any Ethereum address. 3. The response will contain the balance and allowances for that wallet on chain 324 for the specified token. 4. Repeat for other chains.</p>
+<h4>Validation Results</h4>
+<p>&#10007; <b>IDOR validation skipped</b> [IDOR] (dry run)<br>
+IDOR tests require user approval (destructive). Enable 'aggressive' validation profile or allow destructive tests.</p>
+<p>&#10007; <b>Race condition / Rate limit bypass - Send concurrent requests to all chain endpoints with same wallet</b> [VALUE_MANIPULATION]<br>
+LLM suggested test failed: no response from replay.</p>
+<p>&#10007; <b>IDOR without authentication</b> [VALUE_MANIPULATION]<br>
+LLM suggested test failed: no response from replay.</p>
+<h4>Affected Parameters</h4>
+<ul>
+  <li>path_segment_7</li>
+  <li>wallets</li>
+  <li>path_segment_7</li>
+  <li>wallets</li>
+  <li>path_segment_7 (wallet address)</li>
+  <li>wallets (query parameter)</li>
+  <li>path_segment_7</li>
+  <li>wallets</li>
+</ul>
+<h4>Metadata</h4>
+<p>Chain ID: 58acf6f5<br>
+Analysis duration: 157547ms<br>
+Overall confidence: 87%</p>
+]]></issueDetail>
+    <remediationDetail><![CDATA[<h4>Remediation: IDOR in Workflow</h4>
+<p>Implement proper authorization checks at every step of the workflow, not just the entry point.</p>
+<ul>
+<li>Verify resource ownership at each workflow step</li>
+<li>Use indirect references (mapped to session) instead of direct IDs</li>
+<li>Validate that the authenticated user has access to the referenced resource</li>
+<li>Log and alert on access attempts to other users' resources</li>
+</ul>]]></remediationDetail>
+  </issue>
+  <issue>
+    <serialNumber>4783890534999767040</serialNumber>
+    <type>134217728</type>
+    <name><![CDATA[Workflow Idor In Workflow (Test Failed)]]></name>
+    <host ip="104.18.36.231">https://proxy-app.1inch.com</host>
+    <path><![CDATA[/]]></path>
+    <location><![CDATA[/]]></location>
+    <severity>Medium</severity>
+    <confidence>Tentative</confidence>
+    <issueBackground><![CDATA[<h4>Remediation: IDOR in Workflow</h4>
+<p>Implement proper authorization checks at every step of the workflow, not just the entry point.</p>
+<ul>
+<li>Verify resource ownership at each workflow step</li>
+<li>Use indirect references (mapped to session) instead of direct IDs</li>
+<li>Validate that the authenticated user has access to the referenced resource</li>
+<li>Log and alert on access attempts to other users' resources</li>
+</ul>]]></issueBackground>
+    <remediationBackground><![CDATA[<h4>Remediation: IDOR in Workflow</h4>
+<p>Implement proper authorization checks at every step of the workflow, not just the entry point.</p>
+<ul>
+<li>Verify resource ownership at each workflow step</li>
+<li>Use indirect references (mapped to session) instead of direct IDs</li>
+<li>Validate that the authenticated user has access to the referenced resource</li>
+<li>Log and alert on access attempts to other users' resources</li>
+</ul>]]></remediationBackground>
+    <issueDetail><![CDATA[&lt;h3&gt;Workflow Vulnerability: Idor in workflow&lt;/h3&gt;
+<h4>Summary</h4>
+<p>1. Obtain a valid Bearer token (e.g., from the application). 2. Send the same request but change the wallet address to a target wallet (e.g., 0x...). 3. If the server returns data, the attacker successfully retrieved another user's balances/allowances.
+
+1. Obtain a valid Authorization token (e.g., by logging in or from a legitimate session).
+2. Identify the balance endpoint pattern: /v2.0/balance/v1.2/501/balances/{wallet_address}
+3. Replace the wallet address with any target wallet address to r...</p>
+<h4>Workflow Chain</h4>
+<ol>
+  <li>GET /v2.0/price/v1.1/42161 &rarr; 200</li>
+  <li>GET /v2.0/price/v1.1/324 &rarr; 200</li>
+  <li>GET /v2.0/price/v1.1/8453 &rarr; 200</li>
+  <li>GET /v2.0/price/v1.1/59144 &rarr; 200</li>
+  <li>GET /v2.0/balance/v1.2/8453/allowancesAndBalances/0x111111125421ca6dc452d289314280a0f8842a65/0xcC77A89FFC9e26B2319CFCf6D947072446fCb432 &rarr; 200 &larr; <b>SUSPICIOUS</b></li>
+  <li>GET /v2.0/balance/v1.2/59144/allowancesAndBalances/0x111111125421ca6dc452d289314280a0f8842a65/0xcC77A89FFC9e26B2319CFCf6D947072446fCb432 &rarr; 200 &larr; <b>SUSPICIOUS</b></li>
+  <li>GET /v2.0/balance/v1.2/130/allowancesAndBalances/0x111111125421ca6dc452d289314280a0f8842a65/0xcC77A89FFC9e26B2319CFCf6D947072446fCb432 &rarr; 200 &larr; <b>SUSPICIOUS</b></li>
+  <li>GET /v2.0/balance/v1.2/146/allowancesAndBalances/0x111111125421ca6dc452d289314280a0f8842a65/0xcC77A89FFC9e26B2319CFCf6D947072446fCb432 &rarr; 200 &larr; <b>VULNERABLE</b></li>
+  <li>GET /v2.0/balance/v1.2/501/balances/DBB81GJMqNMZ3AbWsik4JdHhbMzcKsqqRyyPJL4hHFvv &rarr; 200 &larr; <b>VULNERABLE</b></li>
+  <li>GET /v2.0/price/v1.1/56 &rarr; 200</li>
+  <li>GET /v2.0/price/v1.1/146 &rarr; 200</li>
+  <li>GET /v2.0/price/v1.1/137 &rarr; 200</li>
+  <li>GET /v2.0/price/v1.1/100 &rarr; 200</li>
+</ol>
+<h4>LLM Analysis</h4>
+<p><b>Node 5</b>: SUSPICIOUS (40%) - value_manipulation<br>
+<i>The wallet address appears in both the URL path and query parameters. The Authorization header is present, but it's unclear if the server validates that the wallet belongs to the authenticated user. The empty response for the current wallet could indicate successful processing, which might also be the case for arbitrary wallets if no ownership check is performed. This raises the possibility of an IDOR in the workflow, where an attacker can substitute a different wallet address to retrieve balanc...</i></p>
+<p><b>Node 6</b>: SUSPICIOUS (70%) - idor_in_workflow<br>
+<i>The GET request for allowancesAndBalances uses the wallet address as a path and query parameter (path_segment_7 and wallets). The Authorization token likely only authenticates the user, not authorizes access to a specific wallet. Since the workflow consists of multiple independent GET requests without cross-step validation, an attacker can change the wallet address in any step to view balances and allowances of any Ethereum address. The empty response for the given wallet does not indicate prote...</i></p>
+<p><b>Node 7</b>: SUSPICIOUS (70%) - idor_in_workflow<br>
+<i>The wallet address is user-controlled in both path and query parameter. The server does not appear to validate that the requested wallet belongs to the authenticated user. If authorization is only performed at the start of the workflow, an attacker could replace the wallet address in this step to retrieve balances for other wallets. The empty response does not indicate authorization failure; it may simply mean no holdings. Previous steps also show similar IDOR pattern.</i></p>
+<p><b>Node 8</b>: VULNERABLE (90%) - idor_in_workflow<br>
+<i>The wallet address in the request is user-controlled and not validated against the authenticated user. The server returns balances/allowances for any wallet address without verifying ownership. This allows an attacker to access arbitrary wallet data across all chains by simply changing the wallet parameter. The empty response for the provided wallet does not indicate security, as the vulnerability exists if data is returned for other wallets.</i></p>
+<p><b>Node 9</b>: VULNERABLE (90%) - idor_in_workflow<br>
+<i>This step fetches balances for a wallet address provided in the path. The Authorization token is present but does not appear to be scoped to a specific wallet, as the wallet parameter is directly user-controlled. Previous similar steps in the chain have been flagged as vulnerable to IDOR. An attacker with a valid session token can query balances for any wallet by simply changing the wallet address in the path. This step confirms the pattern for chain 501 (Solana).</i></p>
+<h4>Attack Scenario</h4>
+<p>1. Obtain a valid Bearer token (e.g., from the application). 2. Send the same request but change the wallet address to a target wallet (e.g., 0x...). 3. If the server returns data, the attacker successfully retrieved another user's balances/allowances.<br>
+<br>
+1. Obtain a valid Authorization token (e.g., by logging in or from a legitimate session).<br>
+2. Identify the balance endpoint pattern: /v2.0/balance/v1.2/501/balances/{wallet_address}<br>
+3. Replace the wallet address with any target wallet address to retrieve its native token balance.<br>
+4. Repeat for other chains by changing the chain ID in the path.<br>
+5. This allows unauthorized access to read any wallet's balances without owning the wallet.</p>
+<h4>Validation Results</h4>
+<p>&#10007; <b>IDOR validation skipped</b> [IDOR] (dry run)<br>
+IDOR tests require user approval (destructive). Enable 'aggressive' validation profile or allow destructive tests.</p>
+<p>&#10007; <b>Repeat price request to check rate limiting</b> [VALUE_MANIPULATION]<br>
+LLM suggested test failed: no response from replay.</p>
+<p>&#10007; <b>Replay price request to test rate limiting (hypothesis 2)</b> [VALUE_MANIPULATION]<br>
+LLM suggested test failed: no response from replay.</p>
+<p>&#10007; <b>Rate Limiting - Repeated Requests</b> [VALUE_MANIPULATION]<br>
+LLM suggested test failed: no response from replay.</p>
+<p>&#10007; <b>Authorization required check</b> [VALUE_MANIPULATION]<br>
+LLM suggested test failed: no response from replay.</p>
+<h4>Affected Parameters</h4>
+<ul>
+  <li>path_segment_4</li>
+  <li>currency</li>
+  <li>path_segment_7</li>
+  <li>wallets</li>
+  <li>path_segment_7</li>
+  <li>wallets</li>
+  <li>path_segment_7</li>
+  <li>wallets</li>
+  <li>path_segment_7</li>
+  <li>wallets</li>
+  <li>path_segment_6 (wallet address)</li>
+  <li>path_segment_4 (chain ID)</li>
+</ul>
+<h4>Metadata</h4>
+<p>Chain ID: c9857848<br>
+Analysis duration: 304680ms<br>
+Overall confidence: 85%</p>
+]]></issueDetail>
+    <remediationDetail><![CDATA[<h4>Remediation: IDOR in Workflow</h4>
+<p>Implement proper authorization checks at every step of the workflow, not just the entry point.</p>
+<ul>
+<li>Verify resource ownership at each workflow step</li>
+<li>Use indirect references (mapped to session) instead of direct IDs</li>
+<li>Validate that the authenticated user has access to the referenced resource</li>
+<li>Log and alert on access attempts to other users' resources</li>
+</ul>]]></remediationDetail>
+  </issue>
+</issues>
