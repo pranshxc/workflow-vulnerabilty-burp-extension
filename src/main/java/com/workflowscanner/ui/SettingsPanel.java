@@ -535,9 +535,21 @@ public class SettingsPanel extends JPanel {
 
     private void updateLiveStatus() {
         SwingUtilities.invokeLater(() -> {
-            // Graph stats
-            graphStatsLabel.setText("Status: " + graph.getNodeCount() + " nodes, "
-                    + graph.getEdgeCount() + " edges");
+            // Graph stats. Show in-heap nodes/edges plus the workflow
+            // candidate split (edge-supported vs session-only) so it
+            // is obvious where each candidate came from.
+            com.workflowscanner.graph.RequestGraph.GraphStats stats = graph.getStats();
+            StringBuilder statsText = new StringBuilder("Status: ")
+                    .append(stats.nodeCount).append(" nodes (relevant: ")
+                    .append(stats.workflowRelevantNodeCount).append("), ")
+                    .append(stats.edgeCount).append(" edges");
+            if (stats.workflowCandidateCount > 0) {
+                statsText.append(", ").append(stats.workflowCandidateCount)
+                        .append(" candidates (edge: ").append(stats.edgeSupportedCandidateCount)
+                        .append(", session: ").append(stats.sessionOnlyCandidateCount)
+                        .append(")");
+            }
+            graphStatsLabel.setText(statsText.toString());
 
             // Backfill status
             if (backfillService != null) {

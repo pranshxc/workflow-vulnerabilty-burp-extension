@@ -261,6 +261,28 @@ public class RequestGraph {
     public int getNodeCount() { return nodes.size(); }
     public int getEdgeCount() { return edges.size(); }
 
+    /**
+     * Count of nodes whose classification is workflow-relevant.
+     * Workflow-relevant nodes are the ones the workflow detector
+     * considers when building candidates. Nodes flagged as
+     * background/static-asset/etc. are excluded.
+     *
+     * <p>This is the canonical "workflow-relevant requests" counter
+     * the status panel needs. It is O(n) on each call, so cache the
+     * result if you need to call it from a hot loop.
+     */
+    public int getWorkflowRelevantNodeCount() {
+        int count = 0;
+        for (RequestNode node : nodes.values()) {
+            com.workflowscanner.classification.RequestClassification cls =
+                    node.getClassification();
+            if (cls != null && cls.isWorkflowRelevant()) {
+                count++;
+            }
+        }
+        return count;
+    }
+
     public int getChainCount() {
         return getConnectedComponents().size();
     }
@@ -277,6 +299,13 @@ public class RequestGraph {
         this.workflowDetector = detector;
         this.config = cfg;
     }
+
+    /**
+     * Get the workflow detector wired into this graph, or null if none
+     * has been set. Used by the status panel to surface edge-supported
+     * vs session-only candidate counts without going through GraphBuilder.
+     */
+    public WorkflowDetector getWorkflowDetector() { return workflowDetector; }
 
     /**
      * Repair nextNodeIndex to be higher than any existing node index.
@@ -300,6 +329,7 @@ public class RequestGraph {
         int maxComponentSize = components.isEmpty() ? 0 : components.get(0).size();
         GraphStats stats = new GraphStats(nodes.size(), edges.size(), components.size(),
                 maxComponentSize, getAllHosts().size());
+        stats.workflowRelevantNodeCount = getWorkflowRelevantNodeCount();
         // Populate candidate counts from workflow detector if set
         if (workflowDetector != null) {
             List<WorkflowCandidate> lastResults = workflowDetector.getLastResults();
@@ -309,6 +339,8 @@ public class RequestGraph {
                     .count();
             stats.displayOnlyCandidateCount = stats.workflowCandidateCount
                     - stats.analysisReadyCandidateCount;
+            stats.edgeSupportedCandidateCount = workflowDetector.getEdgeSupportedCandidateCount();
+            stats.sessionOnlyCandidateCount = workflowDetector.getSessionOnlyCandidateCount();
         }
         return stats;
     }
@@ -344,10 +376,16 @@ public class RequestGraph {
         public final int maxComponentSize;
         public final int hostCount;
 
+        // Subset of nodes whose classification is workflow-relevant.
+        public int workflowRelevantNodeCount;
+
         // Candidate count placeholders; populated externally by WorkflowDetector
         public int workflowCandidateCount;
         public int analysisReadyCandidateCount;
         public int displayOnlyCandidateCount;
+        // Edge-supported (>=1 supporting edge) vs session-only (no edges) split.
+        public int edgeSupportedCandidateCount;
+        public int sessionOnlyCandidateCount;
 
         public GraphStats(int nodeCount, int edgeCount, int componentCount,
                           int maxComponentSize, int hostCount) {
@@ -361,11 +399,15 @@ public class RequestGraph {
         @Override
         public String toString() {
             StringBuilder sb = new StringBuilder();
-            sb.append(String.format("Nodes: %d, Edges: %d, Components: %d, Max component: %d, Hosts: %d",
-                    nodeCount, edgeCount, componentCount, maxComponentSize, hostCount));
+            sb.append(String.format("Nodes: %d (relevant: %d), Edges: %d, Components: %d, Max component: %d, Hosts: %d",
+                    nodeCount, workflowRelevantNodeCount, edgeCount, componentCount,
+                    maxComponentSize, hostCount));
             if (workflowCandidateCount > 0) {
-                sb.append(String.format(", Candidates: %d (analysis-ready: %d, display-only: %d)",
-                        workflowCandidateCount, analysisReadyCandidateCount, displayOnlyCandidateCount));
+                sb.append(String.format(
+                        ", Candidates: %d (edge-supported: %d, session-only: %d, analysis-ready: %d, display-only: %d)",
+                        workflowCandidateCount, edgeSupportedCandidateCount,
+                        sessionOnlyCandidateCount, analysisReadyCandidateCount,
+                        displayOnlyCandidateCount));
             }
             return sb.toString();
         }

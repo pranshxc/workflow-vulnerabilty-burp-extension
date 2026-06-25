@@ -17,9 +17,11 @@ public class StatusBarPanel extends JPanel {
     private final JLabel pipelineLabel;
     private final JLabel graphLabel;
     private final JLabel candidatesLabel;
+    private final JLabel edgesBreakdownLabel;
     private final JLabel findingsLabel;
     private final JLabel errorsLabel;
     private final JLabel suppressedLabel;
+    private final JLabel diagnosticLabel;
 
     private final HealthCheck healthCheck;
     private Timer updateTimer;
@@ -36,21 +38,29 @@ public class StatusBarPanel extends JPanel {
         pipelineLabel = createLabel("Pipeline: --");
         graphLabel = createLabel("Graph: --");
         candidatesLabel = createLabel("Candidates: --");
+        edgesBreakdownLabel = createLabel("(edge/session split unavailable)");
         findingsLabel = createLabel("Findings: --");
         errorsLabel = createLabel("Errors: --");
         suppressedLabel = createLabel("Suppressed: --");
+        // Diagnostic is hidden by default; set visible only when
+        // HealthCheck reports edges=0 + candidates>0.
+        diagnosticLabel = createLabel("");
+        diagnosticLabel.setForeground(new Color(180, 60, 0));
+        diagnosticLabel.setVisible(false);
 
         add(pipelineLabel);
         add(createSeparator());
         add(graphLabel);
         add(createSeparator());
         add(candidatesLabel);
+        add(edgesBreakdownLabel);
         add(createSeparator());
         add(findingsLabel);
         add(createSeparator());
         add(errorsLabel);
         add(createSeparator());
         add(suppressedLabel);
+        add(diagnosticLabel);
 
         startUpdates();
     }
@@ -87,10 +97,15 @@ public class StatusBarPanel extends JPanel {
 
             String nodes = metrics.getOrDefault("graph_nodes", "?");
             String edges = metrics.getOrDefault("graph_edges", "?");
-            graphLabel.setText("Graph: " + nodes + "n/" + edges + "e");
+            String relevant = metrics.getOrDefault("workflow_relevant_requests", "?");
+            graphLabel.setText("Graph: " + nodes + "n/" + edges
+                    + "e (relevant: " + relevant + ")");
 
             String candidates = metrics.getOrDefault("workflow_candidates", "?");
+            String edgeSupp = metrics.getOrDefault("edge_supported_candidates", "?");
+            String sessionOnly = metrics.getOrDefault("session_only_candidates", "?");
             candidatesLabel.setText("Candidates: " + candidates);
+            edgesBreakdownLabel.setText(" (edge: " + edgeSupp + ", session: " + sessionOnly + ")");
 
             String analyzed = metrics.getOrDefault("analyzed_chains", "?");
             String findings = metrics.getOrDefault("findings_count", "?");
@@ -102,6 +117,17 @@ public class StatusBarPanel extends JPanel {
 
             String suppressed = metrics.getOrDefault("suppressed_total", "?");
             suppressedLabel.setText("Suppressed: " + suppressed);
+
+            // Diagnostic: zero edges with non-zero candidates usually
+            // means edge building never ran. Surface it in red so it
+            // is impossible to miss.
+            String warning = metrics.getOrDefault("edges_no_candidate_warning", "0");
+            boolean show = "1".equals(warning);
+            diagnosticLabel.setVisible(show);
+            if (show) {
+                diagnosticLabel.setText(" \u26A0 edges=0 but candidates=" + candidates
+                        + " — run Edge Rebuild");
+            }
 
         } catch (Exception ignored) {
             // Health check not available or metrics not ready

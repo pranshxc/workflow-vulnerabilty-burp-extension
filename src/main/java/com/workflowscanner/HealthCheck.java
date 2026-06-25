@@ -111,9 +111,24 @@ public class HealthCheck {
 
     /**
      * Get a flat metrics map for the StatusBarPanel.
-     * Keys: pipeline_depth, pipeline_capacity, graph_nodes, graph_edges,
-     * workflow_candidates, analyzed_chains, findings_count, llm_errors,
-     * replay_errors, suppressed_total.
+     *
+     * <p><b>Stored vs in-memory distinction (status-clarity rework):</b>
+     * <ul>
+     *   <li>{@code graph_nodes} is now the in-heap node count
+     *       (RequestGraph hot cache).</li>
+     *   <li>{@code workflow_relevant_requests} is the subset of
+     *       stored nodes that the workflow detector actually
+     *       considers. This is the meaningful "requests we
+     *       analyzed" number.</li>
+     *   <li>{@code edge_supported_candidates} vs
+     *       {@code session_only_candidates} breaks the
+     *       {@code workflow_candidates} total down by source:
+     *       edge-supported = at least one supporting edge;
+     *       session-only = no edges (session/boundary heuristic only).</li>
+     *   <li>{@code edges_no_candidate_warning} = "1" when there are
+     *       zero edges and at least one candidate, so the UI can
+     *       surface the "edges missing" diagnostic.</li>
+     * </ul>
      */
     public Map<String, String> getMetrics() {
         Map<String, String> metrics = new LinkedHashMap<>();
@@ -122,7 +137,24 @@ public class HealthCheck {
         metrics.put("pipeline_capacity", pipeline != null ? String.valueOf(pipeline.getTotalSubmitted()) : "?");
         metrics.put("graph_nodes", graph != null ? String.valueOf(graph.getNodeCount()) : "?");
         metrics.put("graph_edges", graph != null ? String.valueOf(graph.getEdgeCount()) : "?");
+        metrics.put("workflow_relevant_requests",
+                graph != null ? String.valueOf(graph.getWorkflowRelevantNodeCount()) : "?");
         metrics.put("workflow_candidates", graph != null ? String.valueOf(graph.getChainCount()) : "?");
+        metrics.put("edge_supported_candidates", graph != null
+                && graph.getWorkflowDetector() != null
+                ? String.valueOf(graph.getWorkflowDetector().getEdgeSupportedCandidateCount()) : "?");
+        metrics.put("session_only_candidates", graph != null
+                && graph.getWorkflowDetector() != null
+                ? String.valueOf(graph.getWorkflowDetector().getSessionOnlyCandidateCount()) : "?");
+
+        // Diagnostic: zero edges with non-zero candidates usually means
+        // edge building never ran (backfill-only project, edge index
+        // rebuild required, etc.). Surface it as an explicit key.
+        int edgeCount = (graph != null) ? graph.getEdgeCount() : 0;
+        int candidateCount = (graph != null) ? graph.getChainCount() : 0;
+        boolean edgeMissing = edgeCount == 0 && candidateCount > 0;
+        metrics.put("edges_no_candidate_warning", edgeMissing ? "1" : "0");
+
         metrics.put("analyzed_chains", analysisEngine != null ? String.valueOf(analysisEngine.getCompletedCandidates()) : "?");
         metrics.put("findings_count", analysisEngine != null ? String.valueOf(analysisEngine.getTotalFindings()) : "?");
         metrics.put("suppressed_total", graphBuilder != null ? String.valueOf(graphBuilder.getSuppressedCount()) : "?");

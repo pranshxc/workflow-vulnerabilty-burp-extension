@@ -664,6 +664,40 @@ public class WorkflowDetector {
                 .toList();
     }
 
+    /**
+     * Count of candidates with at least one supporting edge. A candidate
+     * is "edge supported" when {@code attachSupportingEdges} ran and
+     * found at least one edge connecting two of its steps. This is the
+     * strong-evidence subset — these candidates have concrete graph
+     * evidence that the steps are related, not just session co-occurrence.
+     */
+    public int getEdgeSupportedCandidateCount() {
+        int count = 0;
+        for (WorkflowCandidate c : lastResults) {
+            if (c.getSupportingEdges() != null && !c.getSupportingEdges().isEmpty()) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /**
+     * Count of candidates with no supporting edges. These are produced
+     * solely from session/boundary/method-path heuristic. They are
+     * still valid candidates, but the lack of edges is worth knowing
+     * about — it is the precise reason a candidate can exist when
+     * {@code graph_edges == 0}.
+     */
+    public int getSessionOnlyCandidateCount() {
+        int count = 0;
+        for (WorkflowCandidate c : lastResults) {
+            if (c.getSupportingEdges() == null || c.getSupportingEdges().isEmpty()) {
+                count++;
+            }
+        }
+        return count;
+    }
+
     public void addCandidateListener(Consumer<WorkflowCandidate> listener) {
         candidateListeners.add(listener);
     }
