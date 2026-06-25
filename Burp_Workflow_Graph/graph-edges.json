@@ -1,1 +1,149 @@
-[]
+[
+  {
+    "sourceNodeId": "76901e9e-68b7-4335-aae5-249e251a0630",
+    "targetNodeId": "d791e492-f5ce-4bf3-86b1-55dc94285441",
+    "type": "WORKFLOW_SEQUENCE",
+    "confidence": 0.75,
+    "evidence": "Consecutive workflow candidate steps: candidate\u003d7d233df4-d82, type\u003dUNKNOWN_BUSINESS_FLOW, score\u003d93.0"
+  },
+  {
+    "sourceNodeId": "d791e492-f5ce-4bf3-86b1-55dc94285441",
+    "targetNodeId": "4bf42e3c-f825-459b-8c6a-22a374106097",
+    "type": "WORKFLOW_SEQUENCE",
+    "confidence": 0.75,
+    "evidence": "Consecutive workflow candidate steps: candidate\u003d7d233df4-d82, type\u003dUNKNOWN_BUSINESS_FLOW, score\u003d93.0"
+  },
+  {
+    "sourceNodeId": "4bf42e3c-f825-459b-8c6a-22a374106097",
+    "targetNodeId": "046d9b81-9c47-42fd-b43c-450001b98986",
+    "type": "WORKFLOW_SEQUENCE",
+    "confidence": 0.75,
+    "evidence": "Consecutive workflow candidate steps: candidate\u003d7d233df4-d82, type\u003dUNKNOWN_BUSINESS_FLOW, score\u003d93.0"
+  },
+  {
+    "sourceNodeId": "046d9b81-9c47-42fd-b43c-450001b98986",
+    "targetNodeId": "33831808-3171-4f5d-9200-91959eb46edd",
+    "type": "WORKFLOW_SEQUENCE",
+    "confidence": 0.75,
+    "evidence": "Consecutive workflow candidate steps: candidate\u003d7d233df4-d82, type\u003dUNKNOWN_BUSINESS_FLOW, score\u003d93.0"
+  },
+  {
+    "sourceNodeId": "33831808-3171-4f5d-9200-91959eb46edd",
+    "targetNodeId": "6b0040b6-ad19-4ff3-bd72-6b62ca4cd19f",
+    "type": "WORKFLOW_SEQUENCE",
+    "confidence": 0.75,
+    "evidence": "Consecutive workflow candidate steps: candidate\u003d7d233df4-d82, type\u003dUNKNOWN_BUSINESS_FLOW, score\u003d93.0"
+  },
+  {
+    "sourceNodeId": "6b0040b6-ad19-4ff3-bd72-6b62ca4cd19f",
+    "targetNodeId": "0dab3327-caeb-4879-9579-fff5d9f3cbfb",
+    "type": "WORKFLOW_SEQUENCE",
+    "confidence": 0.75,
+    "evidence": "Consecutive workflow candidate steps: candidate\u003d7d233df4-d82, type\u003dUNKNOWN_BUSINESS_FLOW, score\u003d93.0"
+  },
+  {
+    "sourceNodeId": "0dab3327-caeb-4879-9579-fff5d9f3cbfb",
+    "targetNodeId": "2c911016-084a-4df0-b661-556b343f7478",
+    "type": "WORKFLOW_SEQUENCE",
+    "confidence": 0.75,
+    "evidence": "Consecutive workflow candidate steps: candidate\u003d7d233df4-d82, type\u003dUNKNOWN_BUSINESS_FLOW, score\u003d93.0"
+  },
+  {
+    "sourceNodeId": "2c911016-084a-4df0-b661-556b343f7478",
+    "targetNodeId": "e4d5bd71-81fe-4353-bed5-a83ab3d83a8d",
+    "type": "WORKFLOW_SEQUENCE",
+    "confidence": 0.75,
+    "evidence": "Consecutive workflow candidate steps: candidate\u003d7d233df4-d82, type\u003dUNKNOWN_BUSINESS_FLOW, score\u003d93.0"
+  },
+  {
+    "sourceNodeId": "e4d5bd71-81fe-4353-bed5-a83ab3d83a8d",
+    "targetNodeId": "4a11879a-2be9-4699-80bd-474b4992341b",
+    "type": "WORKFLOW_SEQUENCE",
+    "confidence": 0.75,
+    "evidence": "Consecutive workflow candidate steps: candidate\u003d7d233df4-d82, type\u003dUNKNOWN_BUSINESS_FLOW, score\u003d93.0"
+  },
+  {
+    "sourceNodeId": "4a11879a-2be9-4699-80bd-474b4992341b",
+    "targetNodeId": "edbb1a96-7919-4613-9b67-6b74e710aee8",
+    "type": "WORKFLOW_SEQUENCE",
+    "confidence": 0.75,
+    "evidence": "Consecutive workflow candidate steps: candidate\u003d7d233df4-d82, type\u003dUNKNOWN_BUSINESS_FLOW, score\u003d93.0"
+  },
+  {
+    "sourceNodeId": "edbb1a96-7919-4613-9b67-6b74e710aee8",
+    "targetNodeId": "25921544-7c49-4d62-b0c0-c1d8c6f32943",
+    "type": "WORKFLOW_SEQUENCE",
+    "confidence": 0.75,
+    "evidence": "Consecutive workflow candidate steps: candidate\u003d7d233df4-d82, type\u003dUNKNOWN_BUSINESS_FLOW, score\u003d93.0"
+  },
+  {
+    "sourceNodeId": "25921544-7c49-4d62-b0c0-c1d8c6f32943",
+    "targetNodeId": "1ad2c90e-44a0-4408-97ed-e5c74c16d046",
+    "type": "WORKFLOW_SEQUENCE",
+    "confidence": 0.75,
+    "evidence": "Consecutive workflow candidate steps: candidate\u003d7d233df4-d82, type\u003dUNKNOWN_BUSINESS_FLOW, score\u003d93.0"
+  },
+  {
+    "sourceNodeId": "e514e84d-b2b8-4c5b-bc5e-944921749f18",
+    "targetNodeId": "c05057c1-a4b7-49b4-9231-4e13e55ee37e",
+    "type": "WORKFLOW_SEQUENCE",
+    "confidence": 0.55,
+    "evidence": "Consecutive workflow candidate steps: candidate\u003d6ee1f99e-306, type\u003dUNKNOWN_BUSINESS_FLOW, score\u003d30.0"
+  },
+  {
+    "sourceNodeId": "c05057c1-a4b7-49b4-9231-4e13e55ee37e",
+    "targetNodeId": "50b0a3be-54ee-49a8-ac13-365c04727cef",
+    "type": "WORKFLOW_SEQUENCE",
+    "confidence": 0.55,
+    "evidence": "Consecutive workflow candidate steps: candidate\u003d6ee1f99e-306, type\u003dUNKNOWN_BUSINESS_FLOW, score\u003d30.0"
+  },
+  {
+    "sourceNodeId": "50b0a3be-54ee-49a8-ac13-365c04727cef",
+    "targetNodeId": "664eb8fe-5170-49c3-8775-fa1a65d2b4c4",
+    "type": "WORKFLOW_SEQUENCE",
+    "confidence": 0.55,
+    "evidence": "Consecutive workflow candidate steps: candidate\u003d6ee1f99e-306, type\u003dUNKNOWN_BUSINESS_FLOW, score\u003d30.0"
+  },
+  {
+    "sourceNodeId": "c106f5a3-b2e2-4cb3-a422-1d8cd700d963",
+    "targetNodeId": "82d32e61-1d71-4573-b778-256f076ec255",
+    "type": "WORKFLOW_SEQUENCE",
+    "confidence": 0.55,
+    "evidence": "Consecutive workflow candidate steps: candidate\u003dcf7eab2b-0d6, type\u003dUNKNOWN_BUSINESS_FLOW, score\u003d30.0"
+  },
+  {
+    "sourceNodeId": "82d32e61-1d71-4573-b778-256f076ec255",
+    "targetNodeId": "32fe7eb6-c69f-4b69-9a8f-5b4fd390f29a",
+    "type": "WORKFLOW_SEQUENCE",
+    "confidence": 0.55,
+    "evidence": "Consecutive workflow candidate steps: candidate\u003dcf7eab2b-0d6, type\u003dUNKNOWN_BUSINESS_FLOW, score\u003d30.0"
+  },
+  {
+    "sourceNodeId": "32fe7eb6-c69f-4b69-9a8f-5b4fd390f29a",
+    "targetNodeId": "0cca4de4-f8fe-4f2b-9626-92e1a2fd76de",
+    "type": "WORKFLOW_SEQUENCE",
+    "confidence": 0.55,
+    "evidence": "Consecutive workflow candidate steps: candidate\u003dcf7eab2b-0d6, type\u003dUNKNOWN_BUSINESS_FLOW, score\u003d30.0"
+  },
+  {
+    "sourceNodeId": "00768dfd-ca08-41a0-b9c2-58da9baef6dc",
+    "targetNodeId": "6661c6a6-eb0b-49eb-892a-60c1944dab19",
+    "type": "WORKFLOW_SEQUENCE",
+    "confidence": 0.55,
+    "evidence": "Consecutive workflow candidate steps: candidate\u003d18a73c7b-75b, type\u003dUNKNOWN_BUSINESS_FLOW, score\u003d30.0"
+  },
+  {
+    "sourceNodeId": "6661c6a6-eb0b-49eb-892a-60c1944dab19",
+    "targetNodeId": "fefcafd2-9164-400c-8c2d-2f19daa94d2b",
+    "type": "WORKFLOW_SEQUENCE",
+    "confidence": 0.55,
+    "evidence": "Consecutive workflow candidate steps: candidate\u003d18a73c7b-75b, type\u003dUNKNOWN_BUSINESS_FLOW, score\u003d30.0"
+  },
+  {
+    "sourceNodeId": "fefcafd2-9164-400c-8c2d-2f19daa94d2b",
+    "targetNodeId": "e346f444-e503-4669-b47f-625b906500f3",
+    "type": "WORKFLOW_SEQUENCE",
+    "confidence": 0.55,
+    "evidence": "Consecutive workflow candidate steps: candidate\u003d18a73c7b-75b, type\u003dUNKNOWN_BUSINESS_FLOW, score\u003d30.0"
+  }
+]
