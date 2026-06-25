@@ -120,11 +120,18 @@ public class HealthCheck {
      *       stored nodes that the workflow detector actually
      *       considers. This is the meaningful "requests we
      *       analyzed" number.</li>
+     *   <li>{@code workflow_candidates} is the actual count from
+     *       the workflow detector, not connected components.</li>
+     *   <li>{@code graph_components} is the (lazy) connected-component
+     *       count. 0 unless explicitly requested via
+     *       {@link com.workflowscanner.graph.RequestGraph#getComponentCountOnDemand()}.</li>
      *   <li>{@code edge_supported_candidates} vs
      *       {@code session_only_candidates} breaks the
      *       {@code workflow_candidates} total down by source:
      *       edge-supported = at least one supporting edge;
      *       session-only = no edges (session/boundary heuristic only).</li>
+     *   <li>{@code edges_by_type_*} per-EdgeType counts (cheap O(1)
+     *       reads of the atomic counter map).</li>
      *   <li>{@code edges_no_candidate_warning} = "1" when there are
      *       zero edges and at least one candidate, so the UI can
      *       surface the "edges missing" diagnostic.</li>
@@ -135,23 +142,45 @@ public class HealthCheck {
 
         metrics.put("pipeline_depth", pipeline != null ? String.valueOf(pipeline.size()) : "?");
         metrics.put("pipeline_capacity", pipeline != null ? String.valueOf(pipeline.getTotalSubmitted()) : "?");
-        metrics.put("graph_nodes", graph != null ? String.valueOf(graph.getNodeCount()) : "?");
-        metrics.put("graph_edges", graph != null ? String.valueOf(graph.getEdgeCount()) : "?");
-        metrics.put("workflow_relevant_requests",
-                graph != null ? String.valueOf(graph.getWorkflowRelevantNodeCount()) : "?");
-        metrics.put("workflow_candidates", graph != null ? String.valueOf(graph.getChainCount()) : "?");
-        metrics.put("edge_supported_candidates", graph != null
-                && graph.getWorkflowDetector() != null
-                ? String.valueOf(graph.getWorkflowDetector().getEdgeSupportedCandidateCount()) : "?");
-        metrics.put("session_only_candidates", graph != null
-                && graph.getWorkflowDetector() != null
-                ? String.valueOf(graph.getWorkflowDetector().getSessionOnlyCandidateCount()) : "?");
+
+        int edgeCount = (graph != null) ? graph.getEdgeCount() : 0;
+        int nodeCount = (graph != null) ? graph.getNodeCount() : 0;
+        int relevantCount = (graph != null) ? graph.getWorkflowRelevantNodeCount() : 0;
+        // Real candidate count from detector, not connected components.
+        // Use the live counters (updated by BOTH preview and detect
+        // paths) so the status bar reflects what the user is currently
+        // looking at, not just the last full analysis run.
+        int candidateCount = 0;
+        int edgeSuppCount = 0;
+        int sessionOnlyCount = 0;
+        if (graph != null && graph.getWorkflowDetector() != null) {
+            com.workflowscanner.workflow.WorkflowDetector det = graph.getWorkflowDetector();
+            candidateCount = det.getLiveCandidateCount();
+            edgeSuppCount = det.getLiveEdgeSupportedCount();
+            sessionOnlyCount = det.getLiveSessionOnlyCount();
+        }
+
+        metrics.put("graph_nodes", String.valueOf(nodeCount));
+        metrics.put("graph_edges", String.valueOf(edgeCount));
+        metrics.put("graph_components", "0"); // lazy; populated by on-demand call
+        metrics.put("workflow_relevant_requests", String.valueOf(relevantCount));
+        metrics.put("workflow_candidates", String.valueOf(candidateCount));
+        metrics.put("edge_supported_candidates", String.valueOf(edgeSuppCount));
+        metrics.put("session_only_candidates", String.valueOf(sessionOnlyCount));
+
+        // Per-edge-type counts (O(1) reads from the atomic map).
+        if (graph != null) {
+            java.util.Map<com.workflowscanner.graph.EdgeType, Integer> byType =
+                    graph.getEdgeCountsByType();
+            for (com.workflowscanner.graph.EdgeType t : com.workflowscanner.graph.EdgeType.values()) {
+                metrics.put("edges_by_type_" + t.name(),
+                        String.valueOf(byType.getOrDefault(t, 0)));
+            }
+        }
 
         // Diagnostic: zero edges with non-zero candidates usually means
         // edge building never ran (backfill-only project, edge index
         // rebuild required, etc.). Surface it as an explicit key.
-        int edgeCount = (graph != null) ? graph.getEdgeCount() : 0;
-        int candidateCount = (graph != null) ? graph.getChainCount() : 0;
         boolean edgeMissing = edgeCount == 0 && candidateCount > 0;
         metrics.put("edges_no_candidate_warning", edgeMissing ? "1" : "0");
 

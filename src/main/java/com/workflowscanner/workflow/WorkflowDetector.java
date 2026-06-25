@@ -43,6 +43,14 @@ public class WorkflowDetector {
     private final List<Consumer<WorkflowCandidate>> candidateListeners = new ArrayList<>();
     private List<WorkflowCandidate> lastResults = new ArrayList<>();
 
+    // Live candidate metrics updated by BOTH preview and full-detect
+    // paths. The status panel reads this; it should never be stale
+    // simply because the user looked at the chain list before a full
+    // analysis run.
+    private volatile int liveCandidateCount = 0;
+    private volatile int liveEdgeSupportedCount = 0;
+    private volatile int liveSessionOnlyCount = 0;
+
     // De-duplication: when the same candidate is observed across multiple
     // detection runs, listeners should not be invoked again. The fingerprint
     // covers step order (via ChainVerdict.generateFingerprint), the
@@ -78,12 +86,19 @@ public class WorkflowDetector {
      * @return edge-aware, scored, prioritized candidates
      */
     public List<WorkflowCandidate> previewCandidates(List<RequestNode> allNodes) {
-        if (allNodes == null || allNodes.isEmpty()) return List.of();
+        if (allNodes == null || allNodes.isEmpty()) {
+            updateLiveMetrics(List.of());
+            return List.of();
+        }
+        List<WorkflowCandidate> result;
         if (graph == null || relationshipDetector == null) {
             // Fall back to session-only if graph context has not been wired
-            return detectSessionOnlyInternal(allNodes, false, false);
+            result = detectSessionOnlyInternal(allNodes, false, false);
+        } else {
+            result = detectInternal(allNodes, graph, relationshipDetector, true, false, false);
         }
-        return detectInternal(allNodes, graph, relationshipDetector, true, false, false);
+        updateLiveMetrics(result);
+        return result;
     }
 
     /**
@@ -119,12 +134,16 @@ public class WorkflowDetector {
      * @return sorted list of workflow candidates (highest score first)
      */
     public List<WorkflowCandidate> detect(List<RequestNode> allNodes) {
+        List<WorkflowCandidate> result;
         if (graph != null && relationshipDetector != null) {
-            return detectInternal(allNodes, graph, relationshipDetector,
+            result = detectInternal(allNodes, graph, relationshipDetector,
                     true, true, true);
+        } else {
+            // Fallback: session-only detection without edge attachment
+            result = detectSessionOnlyInternal(allNodes, true, true);
         }
-        // Fallback: session-only detection without edge attachment
-        return detectSessionOnlyInternal(allNodes, true, true);
+        updateLiveMetrics(result);
+        return result;
     }
 
     /**
@@ -519,8 +538,13 @@ public class WorkflowDetector {
      * {@link #previewCandidates(List)}.
      */
     public List<WorkflowCandidate> detectSessionOnly(List<RequestNode> allNodes) {
-        if (allNodes == null || allNodes.isEmpty()) return List.of();
-        return detectSessionOnlyInternal(allNodes, true, true);
+        if (allNodes == null || allNodes.isEmpty()) {
+            updateLiveMetrics(List.of());
+            return List.of();
+        }
+        List<WorkflowCandidate> result = detectSessionOnlyInternal(allNodes, true, true);
+        updateLiveMetrics(result);
+        return result;
     }
 
     /**
@@ -698,6 +722,44 @@ public class WorkflowDetector {
         return count;
     }
 
+    /**
+     * Live candidate count, updated by BOTH {@link #previewCandidates}
+     * and {@link #detect}. Use this in the status panel so the
+     * "edges=0 but candidates>0" diagnostic remains accurate when
+     * the user is looking at the chain list (preview path) rather
+     * than waiting for a full analysis run.
+     */
+    public int getLiveCandidateCount() { return liveCandidateCount; }
+
+    /**
+     * Live edge-supported candidate count, updated alongside
+     * {@link #getLiveCandidateCount()}.
+     */
+    public int getLiveEdgeSupportedCount() { return liveEdgeSupportedCount; }
+
+    /**
+     * Live session-only candidate count, updated alongside
+     * {@link #getLiveCandidateCount()}.
+     */
+    public int getLiveSessionOnlyCount() { return liveSessionOnlyCount; }
+
+    /**
+     * Recompute and cache the live counters from a candidate list.
+     * Called by both preview and full-detect paths.
+     */
+    private void updateLiveMetrics(List<WorkflowCandidate> candidates) {
+        int total = candidates.size();
+        int edge = 0;
+        for (WorkflowCandidate c : candidates) {
+            if (c.getSupportingEdges() != null && !c.getSupportingEdges().isEmpty()) {
+                edge++;
+            }
+        }
+        this.liveCandidateCount = total;
+        this.liveEdgeSupportedCount = edge;
+        this.liveSessionOnlyCount = total - edge;
+    }
+
     public void addCandidateListener(Consumer<WorkflowCandidate> listener) {
         candidateListeners.add(listener);
     }
@@ -706,6 +768,9 @@ public class WorkflowDetector {
         sessionizer.clear();
         lastResults.clear();
         publishedCandidateFingerprints.clear();
+        liveCandidateCount = 0;
+        liveEdgeSupportedCount = 0;
+        liveSessionOnlyCount = 0;
     }
 
     public WorkflowSessionizer getSessionizer() { return sessionizer; }

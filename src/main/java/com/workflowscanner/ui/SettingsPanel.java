@@ -537,7 +537,9 @@ public class SettingsPanel extends JPanel {
         SwingUtilities.invokeLater(() -> {
             // Graph stats. Show in-heap nodes/edges plus the workflow
             // candidate split (edge-supported vs session-only) so it
-            // is obvious where each candidate came from.
+            // is obvious where each candidate came from. All numbers
+            // are O(1) reads — no graph traversal, no
+            // connected-component scan.
             com.workflowscanner.graph.RequestGraph.GraphStats stats = graph.getStats();
             StringBuilder statsText = new StringBuilder("Status: ")
                     .append(stats.nodeCount).append(" nodes (relevant: ")

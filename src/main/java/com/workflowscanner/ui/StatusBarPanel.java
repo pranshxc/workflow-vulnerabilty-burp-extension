@@ -105,7 +105,17 @@ public class StatusBarPanel extends JPanel {
             String edgeSupp = metrics.getOrDefault("edge_supported_candidates", "?");
             String sessionOnly = metrics.getOrDefault("session_only_candidates", "?");
             candidatesLabel.setText("Candidates: " + candidates);
-            edgesBreakdownLabel.setText(" (edge: " + edgeSupp + ", session: " + sessionOnly + ")");
+            // Append a short edge-by-type breakdown so the user can
+            // see which edge types are present without a full settings
+            // panel view. Format: "P/Rd/Rf/C/U" where P=PARAM_REUSE,
+            // Rd=REDIRECT, Rf=REFERRER, C=RESPONSE_CORRELATION, U=USER_DEFINED.
+            String p = metrics.getOrDefault("edges_by_type_PARAM_REUSE", "0");
+            String rd = metrics.getOrDefault("edges_by_type_REDIRECT", "0");
+            String rf = metrics.getOrDefault("edges_by_type_REFERRER", "0");
+            String c = metrics.getOrDefault("edges_by_type_RESPONSE_CORRELATION", "0");
+            String u = metrics.getOrDefault("edges_by_type_USER_DEFINED", "0");
+            edgesBreakdownLabel.setText(" (edge: " + edgeSupp + ", session: " + sessionOnly
+                    + ") [P:" + p + " Rd:" + rd + " Rf:" + rf + " C:" + c + " U:" + u + "]");
 
             String analyzed = metrics.getOrDefault("analyzed_chains", "?");
             String findings = metrics.getOrDefault("findings_count", "?");

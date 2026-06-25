@@ -16,6 +16,7 @@ import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -40,6 +41,20 @@ public class RequestGraph {
     // when the graph has not changed since the last refresh.
     private volatile long graphVersion = 0;
 
+    // O(1) counters maintained by addNode / addEdge / clear / merge so
+    // the status panel can read these without scanning the graph or
+    // doing connected-component traversals on a 1.6M-node dataset.
+    // These are the source of truth for live status; GraphStats is
+    // populated from them.
+    private final AtomicInteger workflowRelevantNodeCount = new AtomicInteger(0);
+    private final ConcurrentHashMap<EdgeType, AtomicInteger> edgesByType =
+            new ConcurrentHashMap<>();
+    {
+        for (EdgeType t : EdgeType.values()) {
+            edgesByType.put(t, new AtomicInteger(0));
+        }
+    }
+
     // Adjacency lists for efficient traversal
     private final Map<String, List<String>> outgoing = new ConcurrentHashMap<>(); // nodeId -> [targetIds]
     private final Map<String, List<String>> incoming = new ConcurrentHashMap<>(); // nodeId -> [sourceIds]
@@ -51,15 +66,31 @@ public class RequestGraph {
     // --- Node Operations ---
 
     public synchronized RequestNode addNode(RequestNode node) {
+        boolean wasNew = !nodes.containsKey(node.getId());
         nodes.put(node.getId(), node);
         outgoing.putIfAbsent(node.getId(), new CopyOnWriteArrayList<>());
         incoming.putIfAbsent(node.getId(), new CopyOnWriteArrayList<>());
+        if (wasNew) {
+            // Maintain O(1) workflow-relevant counter. If the new
+            // node replaces an existing one of the same id, do not
+            // double-count; the old classification (if any) is
+            // effectively overwritten and the new one is what matters.
+            com.workflowscanner.classification.RequestClassification cls =
+                    node.getClassification();
+            if (cls != null && cls.isWorkflowRelevant()) {
+                workflowRelevantNodeCount.incrementAndGet();
+            }
+        }
         graphVersion++;
         return node;
     }
 
     public void addEdge(RequestEdge edge) {
         edges.add(edge);
+        AtomicInteger typeCounter = edgesByType.get(edge.getType());
+        if (typeCounter != null) {
+            typeCounter.incrementAndGet();
+        }
         outgoing.computeIfAbsent(edge.getSourceNodeId(), k -> new CopyOnWriteArrayList<>())
                 .add(edge.getTargetNodeId());
         incoming.computeIfAbsent(edge.getTargetNodeId(), k -> new CopyOnWriteArrayList<>())
@@ -262,25 +293,38 @@ public class RequestGraph {
     public int getEdgeCount() { return edges.size(); }
 
     /**
-     * Count of nodes whose classification is workflow-relevant.
+     * O(1) count of nodes whose classification is workflow-relevant.
      * Workflow-relevant nodes are the ones the workflow detector
      * considers when building candidates. Nodes flagged as
      * background/static-asset/etc. are excluded.
      *
-     * <p>This is the canonical "workflow-relevant requests" counter
-     * the status panel needs. It is O(n) on each call, so cache the
-     * result if you need to call it from a hot loop.
+     * <p>The counter is maintained by {@link #addNode(RequestNode)} and
+     * reset by {@link #clear()}, so this accessor is safe to call from
+     * the status panel timer.
      */
     public int getWorkflowRelevantNodeCount() {
-        int count = 0;
-        for (RequestNode node : nodes.values()) {
-            com.workflowscanner.classification.RequestClassification cls =
-                    node.getClassification();
-            if (cls != null && cls.isWorkflowRelevant()) {
-                count++;
-            }
+        return workflowRelevantNodeCount.get();
+    }
+
+    /**
+     * O(1) count of edges of a given type. Maintained by
+     * {@link #addEdge(RequestEdge)} and reset by {@link #clear()}.
+     */
+    public int getEdgeCountByType(EdgeType type) {
+        AtomicInteger c = edgesByType.get(type);
+        return c == null ? 0 : c.get();
+    }
+
+    /**
+     * Snapshot of the per-type edge counts. Returns a fresh map so the
+     * caller can hold it without worrying about concurrent mutation.
+     */
+    public java.util.Map<EdgeType, Integer> getEdgeCountsByType() {
+        java.util.Map<EdgeType, Integer> snap = new java.util.EnumMap<>(EdgeType.class);
+        for (java.util.Map.Entry<EdgeType, AtomicInteger> e : edgesByType.entrySet()) {
+            snap.put(e.getKey(), e.getValue().get());
         }
-        return count;
+        return snap;
     }
 
     public int getChainCount() {
@@ -324,25 +368,57 @@ public class RequestGraph {
         }
     }
 
+    /**
+     * Live stats. O(1) for the cheap fields. Caller must not depend
+     * on connected-component / max-component-size / host-count fields
+     * being current — those are populated lazily and may be stale
+     * or {@code 0} on the hot path.
+     */
     public GraphStats getStats() {
-        List<List<RequestNode>> components = getConnectedComponents();
-        int maxComponentSize = components.isEmpty() ? 0 : components.get(0).size();
-        GraphStats stats = new GraphStats(nodes.size(), edges.size(), components.size(),
-                maxComponentSize, getAllHosts().size());
+        GraphStats stats = new GraphStats(nodes.size(), edges.size(),
+                0,            // componentCount: lazy, see getComponentCountOnDemand()
+                0,            // maxComponentSize: lazy
+                0);           // hostCount: lazy
         stats.workflowRelevantNodeCount = getWorkflowRelevantNodeCount();
-        // Populate candidate counts from workflow detector if set
+        // Candidate counts come from the workflow detector's live
+        // counters (updated by both preview and detect paths). The
+        // "analysis-ready" split is computed against the live total.
         if (workflowDetector != null) {
-            List<WorkflowCandidate> lastResults = workflowDetector.getLastResults();
-            stats.workflowCandidateCount = lastResults.size();
-            stats.analysisReadyCandidateCount = (int) lastResults.stream()
-                    .filter(c -> c.getWorkflowScore() >= config.getWorkflowScoreThreshold())
-                    .count();
-            stats.displayOnlyCandidateCount = stats.workflowCandidateCount
-                    - stats.analysisReadyCandidateCount;
-            stats.edgeSupportedCandidateCount = workflowDetector.getEdgeSupportedCandidateCount();
-            stats.sessionOnlyCandidateCount = workflowDetector.getSessionOnlyCandidateCount();
+            stats.workflowCandidateCount = workflowDetector.getLiveCandidateCount();
+            stats.edgeSupportedCandidateCount = workflowDetector.getLiveEdgeSupportedCount();
+            stats.sessionOnlyCandidateCount = workflowDetector.getLiveSessionOnlyCount();
+            // For analysis-ready / display-only we still need the
+            // list (to read scores). Only do this on-demand if the
+            // caller actually wants the breakdown; status panels do
+            // not need it.
+            if (config != null) {
+                double threshold = config.getWorkflowScoreThreshold();
+                int ready = 0;
+                for (WorkflowCandidate c : workflowDetector.getLastResults()) {
+                    if (c.getWorkflowScore() >= threshold) ready++;
+                }
+                stats.analysisReadyCandidateCount = ready;
+                stats.displayOnlyCandidateCount = stats.workflowCandidateCount - ready;
+            }
         }
         return stats;
+    }
+
+    /**
+     * Number of connected components (BFS over the graph). O(n) on a
+     * 1.6M-node graph. Use only from explicit user actions like
+     * "Show Components" — never from the status panel timer.
+     */
+    public int getComponentCountOnDemand() {
+        return getConnectedComponents().size();
+    }
+
+    /**
+     * Number of distinct hosts. O(n) on a 1.6M-node graph. Use only
+     * from explicit user actions — never from the status panel timer.
+     */
+    public int getHostCountOnDemand() {
+        return getAllHosts().size();
     }
 
     /**
@@ -354,6 +430,10 @@ public class RequestGraph {
         outgoing.clear();
         incoming.clear();
         nextNodeIndex = 0;
+        workflowRelevantNodeCount.set(0);
+        for (AtomicInteger c : edgesByType.values()) {
+            c.set(0);
+        }
         graphVersion++;
     }
 
@@ -369,11 +449,25 @@ public class RequestGraph {
 
     // --- Stats Record ---
 
+    /**
+     * Lightweight stats snapshot.
+     *
+     * <p>All cheap fields are kept up to date by the graph itself
+     * (nodeCount, edgeCount, workflowRelevantNodeCount, candidate
+     * counts). The expensive fields — {@code componentCount},
+     * {@code maxComponentSize}, {@code hostCount} — require a graph
+     * traversal and may be {@code 0} on the hot path. To get accurate
+     * values, call {@link #getComponentCountOnDemand()} or
+     * {@link #getHostCountOnDemand()} explicitly.
+     */
     public static class GraphStats {
         public final int nodeCount;
         public final int edgeCount;
+        /** Lazy. 0 unless populated by an explicit on-demand call. */
         public final int componentCount;
+        /** Lazy. 0 unless populated by an explicit on-demand call. */
         public final int maxComponentSize;
+        /** Lazy. 0 unless populated by an explicit on-demand call. */
         public final int hostCount;
 
         // Subset of nodes whose classification is workflow-relevant.
