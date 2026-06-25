@@ -138,6 +138,15 @@ public class RequestNode {
         return request != null ? request.getRequestHeaders() : null;
     }
 
+    public void setRequestHeaders(java.util.Map<String, java.util.List<String>> headers) {
+        if (request == null) {
+            // Lazily allocate a CapturedRequest so the headers can be set
+            // even when the node was deserialized without a payload.
+            request = new CapturedRequest();
+        }
+        request.setRequestHeaders(headers);
+    }
+
     /**
      * Check if this is a redirect response (3xx).
      */
