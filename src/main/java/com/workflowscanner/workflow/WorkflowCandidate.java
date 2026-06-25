@@ -74,6 +74,34 @@ public class WorkflowCandidate {
     public List<RequestNode> getSteps() { return steps; }
     public List<RequestEdge> getSupportingEdges() { return supportingEdges; }
 
+    /**
+     * Count of supporting edges whose type is "explicit" (REDIRECT,
+     * REFERRER, PARAM_REUSE, RESPONSE_CORRELATION, USER_DEFINED).
+     * Derived edges like {@code WORKFLOW_SEQUENCE} are excluded.
+     *
+     * <p>Used by the reportability gate to distinguish
+     * session-only candidates (no explicit edges) from
+     * edge-supported candidates. A non-zero value here is a strong
+     * signal that the LLM has real graph evidence to reason about.
+     */
+    public int getExplicitSupportingEdgeCount() {
+        int count = 0;
+        for (RequestEdge e : supportingEdges) {
+            if (e != null && e.getType() != null && e.getType().isExplicit()) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /**
+     * Convenience: true when this candidate has at least one
+     * explicit (non-derived) supporting edge.
+     */
+    public boolean hasExplicitSupportingEdges() {
+        return getExplicitSupportingEdgeCount() > 0;
+    }
+
     public double getWorkflowScore() { return workflowScore; }
     public void setWorkflowScore(double workflowScore) { this.workflowScore = workflowScore; }
 

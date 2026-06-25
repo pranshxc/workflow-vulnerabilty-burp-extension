@@ -384,8 +384,15 @@ public class WorkflowVulnScanner implements BurpExtension {
             if (requestStore != null) {
                 advisoryManager.setRequestStore(requestStore);
             }
+            // Reportability gate (reportability rework): the gate is
+            // the single place where "is this worth a Burp issue?"
+            // is decided. Wire it with the live config so toggles
+            // like reportFailedValidationHypotheses are honored at
+            // runtime.
+            this.advisoryManager.setReportabilityGate(
+                    new com.workflowscanner.analysis.ReportabilityGate(config, logger));
             logger.log(LogCategory.EXTENSION, LogLevel.INFO, "WorkflowVulnScanner",
-                    "Advisory manager initialized.");
+                    "Advisory manager initialized (with reportability gate).");
         } catch (Exception e) {
             logger.log(LogCategory.ERROR, LogLevel.ERROR, "WorkflowVulnScanner",
                     "Failed to initialize advisory manager.", e);
@@ -440,7 +447,14 @@ public class WorkflowVulnScanner implements BurpExtension {
 
                             // Create advisory from validated findings
                             if (advisoryManager != null) {
-                                var issue = advisoryManager.createFromVerdict(verdict, validationResults);
+                                // Pass the source candidate through
+                                // to the gate so it can see the
+                                // supporting edges and workflow
+                                // type. The candidate is attached
+                                // to the verdict by AnalysisEngine.
+                                var issue = advisoryManager.createFromVerdict(
+                                        verdict, validationResults,
+                                        verdict.getSourceCandidate());
                                 if (issue != null) {
                                     eventBus.publish(EventBus.Event.ISSUE_CREATED, issue);
                                     logger.log(LogCategory.ADVISORY, LogLevel.INFO, "Pipeline",
@@ -530,6 +544,9 @@ public class WorkflowVulnScanner implements BurpExtension {
                     llmClient, analysisEngine);
             if (requestStore != null) {
                 healthCheck.setRequestStore(requestStore);
+            }
+            if (advisoryManager != null) {
+                healthCheck.setAdvisoryManager(advisoryManager);
             }
             healthCheck.start(60); // Check every 60 seconds
             logger.log(LogCategory.EXTENSION, LogLevel.INFO, "WorkflowVulnScanner",

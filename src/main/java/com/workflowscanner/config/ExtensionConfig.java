@@ -68,6 +68,26 @@ public class ExtensionConfig {
     // relationship-detection indexes.
     private int indexMaxPerKey = 50;
 
+    // --- Reportability Gate (added in reportability rework) ---
+    // Default false: do not export advisories for LLM hypotheses
+    // that were not confirmed by validation. The previous default
+    // (true) was the source of most of the noisy "IDOR on /balance"
+    // findings on the test dataset.
+    private boolean reportUnconfirmedFindings = false;
+    // Default false: do not export advisories that come from LLM
+    // analysis alone with no validation run at all.
+    private boolean reportLLMOnlyFindings = false;
+    // Default false: do not export advisories for hypotheses whose
+    // validation tests all failed (replay error, mutation not
+    // applied, dry-run). Set true only if you want the gate to log
+    // failed-validation findings as informational Burp issues.
+    private boolean reportFailedValidationHypotheses = false;
+    // Default false: do not analyze read-only session-only
+    // candidates (the exact pattern that produced the noisy 1inch
+    // dataset's /price /balance /wallet findings). Set true to
+    // spend LLM calls on them anyway.
+    private boolean analyzeReadOnlyCandidates = false;
+
     // --- Constructors ---
 
     public ExtensionConfig() {
@@ -148,6 +168,10 @@ public class ExtensionConfig {
         this.hotGraphNodeLimit = defaults.hotGraphNodeLimit;
         this.hotRawRetention = defaults.hotRawRetention;
         this.indexMaxPerKey = defaults.indexMaxPerKey;
+        this.reportUnconfirmedFindings = defaults.reportUnconfirmedFindings;
+        this.reportLLMOnlyFindings = defaults.reportLLMOnlyFindings;
+        this.reportFailedValidationHypotheses = defaults.reportFailedValidationHypotheses;
+        this.analyzeReadOnlyCandidates = defaults.analyzeReadOnlyCandidates;
     }
 
     // --- Getters and Setters ---
@@ -233,4 +257,18 @@ public class ExtensionConfig {
 
     public int getIndexMaxPerKey() { return indexMaxPerKey; }
     public void setIndexMaxPerKey(int indexMaxPerKey) { this.indexMaxPerKey = indexMaxPerKey; }
+
+    // --- Reportability Gate ---
+
+    public boolean isReportUnconfirmedFindings() { return reportUnconfirmedFindings; }
+    public void setReportUnconfirmedFindings(boolean v) { this.reportUnconfirmedFindings = v; }
+
+    public boolean isReportLLMOnlyFindings() { return reportLLMOnlyFindings; }
+    public void setReportLLMOnlyFindings(boolean v) { this.reportLLMOnlyFindings = v; }
+
+    public boolean isReportFailedValidationHypotheses() { return reportFailedValidationHypotheses; }
+    public void setReportFailedValidationHypotheses(boolean v) { this.reportFailedValidationHypotheses = v; }
+
+    public boolean isAnalyzeReadOnlyCandidates() { return analyzeReadOnlyCandidates; }
+    public void setAnalyzeReadOnlyCandidates(boolean v) { this.analyzeReadOnlyCandidates = v; }
 }

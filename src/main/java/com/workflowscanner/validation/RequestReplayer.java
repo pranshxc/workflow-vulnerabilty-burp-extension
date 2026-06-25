@@ -287,12 +287,30 @@ public class RequestReplayer {
                             + (modifications != null ? " [" + modifications.size() + " mods]" : ""));
 
             // Send through Burp
+            long sendStart = System.currentTimeMillis();
             HttpRequestResponse result = api.http().sendRequest(request);
+            long sendMs = System.currentTimeMillis() - sendStart;
             HttpResponse response = result.response();
 
             if (response == null) {
+                // Actionable failure log (reportability rework).
+                // The old "No response received for replay" was not
+                // useful because the validation engine had no way to
+                // know if the cause was a timeout, a TLS error, a
+                // missing service, or Burp returning null. We now
+                // log the target URL, method, host, port, protocol,
+                // elapsed time, and a hint about likely cause. The
+                // reportability gate treats this as a failed
+                // validation by default.
                 logger.log(LogCategory.ANALYSIS, LogLevel.WARN, "RequestReplayer",
-                        "No response received for replay.");
+                        "Replay returned no response after " + sendMs + "ms: "
+                                + method + " " + url
+                                + " host=" + (captured.getHost() != null ? captured.getHost() : "?")
+                                + " port=" + inferPort(url)
+                                + " protocol=" + inferProtocol(url)
+                                + " | likely: timeout/connect-fail if " + sendMs + "ms is high; "
+                                + "TLS if protocol=https; "
+                                + "missing-service if Burp can't reach the host.");
                 return null;
             }
 
@@ -306,15 +324,73 @@ public class RequestReplayer {
 
             logger.log(LogCategory.ANALYSIS, LogLevel.INFO, "RequestReplayer",
                     "Replay response: " + replayResponse.statusCode
-                            + " (" + (replayResponse.body != null ? replayResponse.body.length() : 0) + " bytes)");
+                            + " (" + (replayResponse.body != null ? replayResponse.body.length() : 0) + " bytes)"
+                            + " in " + sendMs + "ms");
 
             return replayResponse;
 
         } catch (Exception e) {
+            // Actionable failure log (reportability rework): classify
+            // the exception type and log a one-line diagnostic so the
+            // user can tell why the replay failed (timeout / TLS /
+            // connect / unknown host / other). The previous "Replay
+            // failed" was a single line that did not explain
+            // anything.
+            String exClass = e.getClass().getName();
+            String simpleName = e.getClass().getSimpleName();
+            String hint;
+            if (exClass.contains("Timeout") || exClass.contains("timeout")) {
+                hint = "TIMEOUT (increase Burp timeouts or check the target is reachable)";
+            } else if (exClass.contains("SSL") || exClass.contains("ssl")
+                    || exClass.contains("Tls") || exClass.contains("tls")) {
+                hint = "TLS ERROR (certificate issue, SNI mismatch, or TLS version)";
+            } else if (exClass.contains("Connect") || exClass.contains("connect")) {
+                hint = "CONNECT ERROR (target host/port unreachable, or firewall blocking)";
+            } else if (exClass.contains("UnknownHost") || exClass.contains("unknownhost")) {
+                hint = "UNKNOWN HOST (DNS resolution failed; check hostname spelling)";
+            } else if (exClass.contains("NullPointer")) {
+                hint = "NULL POINTER (Burp returned null — likely out-of-scope URL or invalid host)";
+            } else {
+                hint = "OTHER";
+            }
             logger.log(LogCategory.ERROR, LogLevel.ERROR, "RequestReplayer",
-                    "Replay failed.", e);
+                    "Replay failed: " + captured.getMethod() + " " + captured.getUrl()
+                            + " | exception=" + exClass
+                            + " | hint=" + hint
+                            + " | message=" + e.getMessage(),
+                    e);
             return null;
         }
+    }
+
+    /**
+     * Extract the port from a URL, defaulting to 443 for https and
+     * 80 for http when not explicit. Used for the actionable
+     * replay-failure log.
+     */
+    private static int inferPort(String url) {
+        if (url == null) return -1;
+        try {
+            java.net.URI uri = java.net.URI.create(url);
+            int p = uri.getPort();
+            if (p > 0) return p;
+            if ("https".equalsIgnoreCase(uri.getScheme())) return 443;
+            if ("http".equalsIgnoreCase(uri.getScheme())) return 80;
+        } catch (Exception ignored) {
+            // Fall through to default.
+        }
+        return -1;
+    }
+
+    /**
+     * Extract the protocol ("http" / "https") from a URL, lowercased.
+     * Returns "?" when no scheme is detectable.
+     */
+    private static String inferProtocol(String url) {
+        if (url == null) return "?";
+        int colon = url.indexOf("://");
+        if (colon <= 0) return "?";
+        return url.substring(0, colon).toLowerCase();
     }
 
     /**

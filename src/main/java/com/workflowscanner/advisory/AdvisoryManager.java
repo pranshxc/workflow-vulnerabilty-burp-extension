@@ -9,6 +9,8 @@ import burp.api.montoya.scanner.audit.issues.AuditIssueConfidence;
 import burp.api.montoya.scanner.audit.issues.AuditIssueSeverity;
 
 import com.workflowscanner.analysis.ChainVerdict;
+import com.workflowscanner.analysis.ReportabilityDecision;
+import com.workflowscanner.analysis.ReportabilityGate;
 import com.workflowscanner.data.CapturedRequest;
 import com.workflowscanner.graph.RequestNode;
 import com.workflowscanner.logging.ExtensionLogger;
@@ -17,6 +19,7 @@ import com.workflowscanner.logging.LogLevel;
 import com.workflowscanner.store.RequestHydrator;
 import com.workflowscanner.store.RequestStore;
 import com.workflowscanner.validation.ValidationResult;
+import com.workflowscanner.workflow.WorkflowCandidate;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -25,6 +28,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Manages creation and lifecycle of Burp Suite scanner issues (advisories)
@@ -36,6 +40,14 @@ import java.util.concurrent.CopyOnWriteArrayList;
  * - Issue deduplication via fingerprint
  * - Cross-references between related issues
  * - Issue tracking and statistics
+ *
+ * <p><b>Reportability gate (reportability rework):</b> the manager
+ * delegates the "is this worth a Burp issue?" decision to
+ * {@link ReportabilityGate}. The gate's decision is final for the
+ * default config; the {@code reportUnconfirmedFindings},
+ * {@code reportLLMOnlyFindings}, and
+ * {@code reportFailedValidationHypotheses} settings can re-enable
+ * suppressed findings for users who want to see every hypothesis.
  */
 public class AdvisoryManager {
 
@@ -53,6 +65,21 @@ public class AdvisoryManager {
     // request/response pairs in the Burp UI.
     private volatile RequestStore requestStore;
 
+    // Reportability gate. When set, every createFromVerdict call
+    // is filtered through the gate so low-signal findings never
+    // become Burp issues. Set externally by the bootstrap.
+    private volatile ReportabilityGate reportabilityGate;
+
+    // Live counters for the status panel. Read by HealthCheck so
+    // the user can see how many findings the gate suppressed and
+    // for what reason. O(1) reads, no graph scans.
+    private final AtomicLong suppressedByGate = new AtomicLong(0);
+    private final AtomicLong suppressedPublicResource = new AtomicLong(0);
+    private final AtomicLong suppressedValidationFailed = new AtomicLong(0);
+    private final AtomicLong suppressedLowSignal = new AtomicLong(0);
+    private final AtomicLong reportedNeedsReview = new AtomicLong(0);
+    private final AtomicLong reportedConfirmed = new AtomicLong(0);
+
     public AdvisoryManager(MontoyaApi api, ExtensionLogger logger) {
         this.api = api;
         this.logger = logger;
@@ -64,14 +91,87 @@ public class AdvisoryManager {
     }
 
     /**
-     * Create a Burp advisory from a chain verdict and optional validation results.
-     * Handles deduplication, severity mapping, and issue registration.
-     *
-     * @return The created issue, or null if deduplicated/dismissed
+     * Set the reportability gate. When unset, the manager falls
+     * back to the legacy "validated / probable / errored" branch
+     * for backward compatibility with code paths that have not yet
+     * been updated to use the gate.
+     */
+    public void setReportabilityGate(ReportabilityGate gate) {
+        this.reportabilityGate = gate;
+    }
+
+    /**
+     * Backward-compatible entry point: no candidate passed to the
+     * gate. The gate will fall back to a low-signal decision when
+     * it cannot see the candidate's supporting edges / public
+     * endpoint pattern. Prefer the 3-arg overload.
      */
     public WorkflowAuditIssue createFromVerdict(ChainVerdict verdict,
                                                   List<ValidationResult> validationResults) {
-        if (verdict == null || verdict.isSafe()) return null;
+        return createFromVerdict(verdict, validationResults, null);
+    }
+
+    /**
+     * Create a Burp advisory from a chain verdict and optional
+     * validation results. Handles deduplication, severity mapping,
+     * and issue registration.
+     *
+     * <p><b>Reportability gate (reportability rework):</b> when a
+     * gate is set, the call goes through {@code gate.decide(...)}
+     * first and the issue is suppressed (return null, no Burp
+     * issue) if the gate's decision is a SUPPRESS_* outcome. The
+     * {@code candidate} is optional but recommended — without it,
+     * the gate cannot evaluate public-resource patterns or
+     * explicit-edge support and falls back to a low-signal
+     * decision.
+     *
+     * @param verdict           the LLM verdict for the chain
+     * @param validationResults the validation results; may be null/empty
+     * @param candidate         the workflow candidate backing this
+     *                          verdict; may be null
+     * @return the created issue, or null if suppressed by the gate
+     *         or deduplicated/dismissed
+     */
+    public WorkflowAuditIssue createFromVerdict(ChainVerdict verdict,
+                                                  List<ValidationResult> validationResults,
+                                                  WorkflowCandidate candidate) {
+        if (verdict == null) return null;
+
+        // Reportability gate: if it suppresses, return null BEFORE
+        // the safe-verdict / dedup short-circuits, so the counters
+        // for suppression are always incremented when the gate is
+        // consulted. (The safe-verdict check is also a low-signal
+        // SUPPRESS, but it's cheap and uninteresting to count.)
+        if (reportabilityGate != null) {
+            ReportabilityDecision decision = reportabilityGate.decide(
+                    verdict, candidate, validationResults);
+            if (decision.isSuppressed()) {
+                suppressedByGate.incrementAndGet();
+                switch (decision) {
+                    case SUPPRESS_PUBLIC_RESOURCE: suppressedPublicResource.incrementAndGet(); break;
+                    case SUPPRESS_VALIDATION_FAILED: suppressedValidationFailed.incrementAndGet(); break;
+                    case SUPPRESS_LOW_SIGNAL:
+                    case SUPPRESS_READ_ONLY_SESSION_ONLY:
+                    default: suppressedLowSignal.incrementAndGet(); break;
+                }
+                if (logger != null) {
+                    logger.log(LogCategory.ADVISORY, LogLevel.DEBUG, "AdvisoryManager",
+                            "Suppressed by gate [" + decision.name() + "]: "
+                                    + verdict.getVulnerabilityType()
+                                    + " chain=" + verdict.getChainId());
+                }
+                return null;
+            }
+            // Track what we report too.
+            if (decision == ReportabilityDecision.REPORT_CONFIRMED) {
+                reportedConfirmed.incrementAndGet();
+            } else if (decision == ReportabilityDecision.REPORT_NEEDS_REVIEW) {
+                reportedNeedsReview.incrementAndGet();
+            }
+        } else {
+            // No gate wired — keep the legacy safe-verdict short-circuit.
+            if (verdict.isSafe()) return null;
+        }
 
         // Generate fingerprint for deduplication
         String fingerprint = generateFingerprint(verdict);
@@ -326,4 +426,24 @@ public class AdvisoryManager {
     public boolean isDuplicate(String fingerprint) {
         return issueFingerprintMap.containsKey(fingerprint);
     }
+
+    // --- Reportability-gate counters ---
+
+    /** Total findings suppressed by the gate (any reason). */
+    public long getSuppressedByGateCount() { return suppressedByGate.get(); }
+
+    /** Findings suppressed because the endpoint is a public resource. */
+    public long getSuppressedPublicResourceCount() { return suppressedPublicResource.get(); }
+
+    /** Findings suppressed because all validation tests failed. */
+    public long getSuppressedValidationFailedCount() { return suppressedValidationFailed.get(); }
+
+    /** Findings suppressed as low-signal (no probable/explicit/state-change/critical). */
+    public long getSuppressedLowSignalCount() { return suppressedLowSignal.get(); }
+
+    /** Findings reported as needs-review (probable validation / explicit edges / state-change / critical). */
+    public long getReportedNeedsReviewCount() { return reportedNeedsReview.get(); }
+
+    /** Findings reported as confirmed (strict proof). */
+    public long getReportedConfirmedCount() { return reportedConfirmed.get(); }
 }

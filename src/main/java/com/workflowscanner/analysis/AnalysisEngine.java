@@ -185,10 +185,23 @@ public class AnalysisEngine {
                 return;
             }
 
-            // Filter to analysis-ready candidates (respect configured threshold)
+            // Filter to analysis-ready candidates (respect configured threshold
+            // and the read-only filter from the reportability gate).
+            //
+            // Default behavior (reportability rework): skip read-only
+            // session-only candidates that have no explicit edges
+            // and no critical workflow type. The exact pattern from
+            // the noisy 1inch dataset (GET /price, GET /balance,
+            // GET /wallet). These still appear in the Graph tab
+            // (the workflow detector emits them) but do not consume
+            // an LLM call. Users can opt in via
+            // ExtensionConfig.setAnalyzeReadOnlyCandidates(true).
             double analysisThreshold = config.getWorkflowScoreThreshold();
+            boolean analyzeReadOnly = config.isAnalyzeReadOnlyCandidates();
             List<WorkflowCandidate> analysisCandidates = candidates.stream()
                     .filter(c -> c.getWorkflowScore() >= analysisThreshold)
+                    .filter(c -> analyzeReadOnly
+                            || !isLowSignalReadOnly(c))
                     .toList();
 
             if (analysisCandidates.isEmpty()) {
@@ -274,6 +287,10 @@ public class AnalysisEngine {
         ChainVerdict verdict = new ChainVerdict();
         verdict.setChainId(candidateId);
         verdict.setFingerprint(fingerprint);
+        // Pass the source candidate through to the verdict so the
+        // AdvisoryManager / ReportabilityGate can see the supporting
+        // edges and workflow type without re-querying the graph.
+        verdict.setSourceCandidate(candidate);
         // Convert WorkflowStep -> RequestNode for backward compat
         List<RequestNode> nodes = new ArrayList<>();
         for (RequestNode step : candidate.getSteps()) {
@@ -567,4 +584,48 @@ public class AnalysisEngine {
     public int getCompletedCandidates() { return completedCandidates.get(); }
     public long getTotalLLMCalls() { return totalLLMCalls.get(); }
     public long getTotalFindings() { return totalFindings.get(); }
+
+    /**
+     * Return true if a candidate is the exact low-signal read-only
+     * pattern: all GET/HEAD, no explicit (non-derived) supporting
+     * edges, and the workflow type is not one of the
+     * "critical workflow" types the gate would treat as needing
+     * review regardless. Used by the analysis pipeline to skip
+     * these candidates before they consume an LLM call.
+     *
+     * <p>This is the analysis-side mirror of the reportability
+     * gate's SUPPRESS_READ_ONLY_SESSION_ONLY outcome. Both apply
+     * the same rule so the user does not see LLM analyses for
+     * candidates that the gate would have suppressed anyway.
+     */
+    private static boolean isLowSignalReadOnly(WorkflowCandidate c) {
+        if (c == null || c.getSteps() == null || c.getSteps().isEmpty()) {
+            return false;
+        }
+        boolean readOnly = c.getSteps().stream().allMatch(n -> {
+            String m = n.getMethod() == null ? "GET" : n.getMethod().toUpperCase();
+            return "GET".equals(m) || "HEAD".equals(m);
+        });
+        if (!readOnly) return false;
+        if (c.hasExplicitSupportingEdges()) return false;
+        // Critical workflow types are not low-signal even if read-only.
+        com.workflowscanner.workflow.WorkflowType t = c.getWorkflowType();
+        if (t != null) {
+            switch (t) {
+                case AUTHENTICATION:
+                case PASSWORD_RESET:
+                case CHECKOUT:
+                case PAYMENT:
+                case TRANSFER:
+                case ROLE_ADMIN:
+                case APPROVAL:
+                case INVITATION:
+                case FILE_UPLOAD:
+                    return false;
+                default:
+                    break;
+            }
+        }
+        return true;
+    }
 }

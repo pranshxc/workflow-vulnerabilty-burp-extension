@@ -31,6 +31,9 @@ public class HealthCheck {
     // Optional. Set when the disk-backed store is wired in (Commit 2).
     // When null, the stored-requests metric keys read 0.
     private volatile RequestStore requestStore;
+    // Optional. Set when the advisory manager is wired in. When
+    // null, the reportability_gated_* metric keys read 0.
+    private volatile com.workflowscanner.advisory.AdvisoryManager advisoryManager;
 
     private ScheduledExecutorService scheduler;
     private volatile Map<String, SubsystemStatus> lastStatus = new LinkedHashMap<>();
@@ -53,6 +56,15 @@ public class HealthCheck {
      */
     public void setRequestStore(RequestStore store) {
         this.requestStore = store;
+    }
+
+    /**
+     * Set the advisory manager so the reportability-gate counters
+     * can be surfaced in the status panel. When unset, the
+     * {@code reportability_gated_*} metric keys read 0.
+     */
+    public void setAdvisoryManager(com.workflowscanner.advisory.AdvisoryManager mgr) {
+        this.advisoryManager = mgr;
     }
 
     /**
@@ -259,6 +271,34 @@ public class HealthCheck {
         metrics.put("suppressed_total", graphBuilder != null ? String.valueOf(graphBuilder.getSuppressedCount()) : "?");
         metrics.put("llm_errors", llmClient != null ? String.valueOf(llmClient.getTotalErrors()) : "?");
         metrics.put("replay_errors", "0"); // Replay errors tracked internally
+
+        // Reportability-gate counters (reportability rework).
+        // The user can see at a glance how many findings the gate
+        // suppressed, broken down by reason, plus how many went
+        // through as confirmed or needs-review. Reading from the
+        // advisory manager means the values are accurate even if
+        // the gate's decisions were spread across multiple chains.
+        if (advisoryManager != null) {
+            metrics.put("reportability_gated_total",
+                    String.valueOf(advisoryManager.getSuppressedByGateCount()));
+            metrics.put("reportability_gated_public_resource",
+                    String.valueOf(advisoryManager.getSuppressedPublicResourceCount()));
+            metrics.put("reportability_gated_validation_failed",
+                    String.valueOf(advisoryManager.getSuppressedValidationFailedCount()));
+            metrics.put("reportability_gated_low_signal",
+                    String.valueOf(advisoryManager.getSuppressedLowSignalCount()));
+            metrics.put("reportability_gated_reported_confirmed",
+                    String.valueOf(advisoryManager.getReportedConfirmedCount()));
+            metrics.put("reportability_gated_reported_needs_review",
+                    String.valueOf(advisoryManager.getReportedNeedsReviewCount()));
+        } else {
+            metrics.put("reportability_gated_total", "0");
+            metrics.put("reportability_gated_public_resource", "0");
+            metrics.put("reportability_gated_validation_failed", "0");
+            metrics.put("reportability_gated_low_signal", "0");
+            metrics.put("reportability_gated_reported_confirmed", "0");
+            metrics.put("reportability_gated_reported_needs_review", "0");
+        }
 
         return metrics;
     }

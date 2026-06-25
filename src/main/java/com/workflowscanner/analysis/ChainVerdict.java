@@ -3,6 +3,7 @@ package com.workflowscanner.analysis;
 import com.workflowscanner.graph.RequestNode;
 import com.workflowscanner.llm.LLMAnalysisResult;
 import com.workflowscanner.llm.SuggestedTest;
+import com.workflowscanner.workflow.WorkflowCandidate;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -28,6 +29,12 @@ public class ChainVerdict {
     private long startTime;
     private long endTime;
     private String errorMessage;
+    // Source candidate (added in reportability rework) so the
+    // AdvisoryManager / ReportabilityGate can see the supporting
+    // edges and workflow type without re-querying the graph.
+    // Optional; legacy callers leave it null and the gate falls
+    // back to a low-signal decision.
+    private transient WorkflowCandidate sourceCandidate;
 
     public ChainVerdict() {
         this.nodeResults = new ArrayList<>();
@@ -172,6 +179,11 @@ public class ChainVerdict {
 
     public String getErrorMessage() { return errorMessage; }
     public void setErrorMessage(String errorMessage) { this.errorMessage = errorMessage; }
+
+    public WorkflowCandidate getSourceCandidate() { return sourceCandidate; }
+    public void setSourceCandidate(WorkflowCandidate sourceCandidate) {
+        this.sourceCandidate = sourceCandidate;
+    }
 
     @Override
     public String toString() {
