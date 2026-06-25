@@ -256,9 +256,17 @@ public class WorkflowVulnScanner implements BurpExtension {
 
     private void startGraphBuilder() {
         try {
+            // Wire the disk-backed store into the graph builder so
+            // every captured request is persisted to the store
+            // (canonical record) and the hot in-memory graph is
+            // kept as a working view of workflow-relevant traffic.
+            if (graphBuilder != null && requestStore != null) {
+                graphBuilder.setRequestStore(requestStore);
+            }
             graphBuilder.start(pipeline, config);
             logger.log(LogCategory.GRAPH, LogLevel.INFO, "WorkflowVulnScanner",
-                    "Graph builder started.");
+                    "Graph builder started (request store: "
+                            + (requestStore != null ? "wired" : "in-memory only") + ").");
         } catch (Exception e) {
             logger.log(LogCategory.ERROR, LogLevel.ERROR, "WorkflowVulnScanner",
                     "Failed to start graph builder.", e);

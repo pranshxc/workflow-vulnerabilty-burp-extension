@@ -17,6 +17,10 @@ import com.workflowscanner.data.RequestPipeline;
 import com.workflowscanner.logging.ExtensionLogger;
 import com.workflowscanner.logging.LogCategory;
 import com.workflowscanner.logging.LogLevel;
+import com.workflowscanner.store.RawHttp;
+import com.workflowscanner.store.RequestStore;
+import com.workflowscanner.store.RequestStoreConversion;
+import com.workflowscanner.store.RequestSummary;
 import com.workflowscanner.workflow.WorkflowDetector;
 
 import java.io.File;
@@ -75,11 +79,21 @@ public class GraphBuilder {
 
     private volatile RequestPipeline pipeline;
     private volatile ExtensionConfig config;
+    // Disk-backed canonical store. When set, every request is
+    // persisted to it (summary + raw) before the hot graph view
+    // is updated, so full backfill can survive at scale.
+    private volatile RequestStore requestStore;
     private Thread consumerThread;
     private ScheduledExecutorService autoSaveScheduler;
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicLong nodesProcessed = new AtomicLong(0);
     private final AtomicLong edgesCreated = new AtomicLong(0);
+    private final AtomicLong storedCount = new AtomicLong(0);
+    // When the in-memory graph gets too big, we drop the raw
+    // CapturedRequest from RequestNode and rely on the store to
+    // serve raw data on demand. Keeps the working set bounded.
+    private static final int HOT_GRAPH_RAW_RETENTION = 200_000;
+    private final AtomicLong rawDropped = new AtomicLong(0);
 
     public GraphBuilder(RequestGraph graph, ExtensionLogger logger) {
         this.graph = graph;
@@ -112,6 +126,21 @@ public class GraphBuilder {
      */
     public void setApplicationModel(ApplicationModel model) {
         this.applicationModel = model;
+    }
+
+    /**
+     * Set the disk-backed request store. When set, every request
+     * (workflow-relevant or not) is persisted to the store as
+     * {@link RequestSummary} + {@link RawHttp}. The hot in-memory
+     * {@link RequestGraph} is still maintained, but its purpose
+     * shifts from "canonical record" to "working view": it holds
+     * only the workflow-relevant subset, and the raw HTTP payload
+     * is dropped from each node once the graph grows past
+     * {@link #HOT_GRAPH_RAW_RETENTION} entries (the raw data
+     * remains recoverable via {@link RequestStore#getRaw(String)}).
+     */
+    public void setRequestStore(RequestStore store) {
+        this.requestStore = store;
     }
 
     private void notifyGraphUpdated() {
@@ -200,12 +229,30 @@ public class GraphBuilder {
     /**
      * Process a single request: classify, extract params, create node, detect edges.
      * Noise requests (STATIC_ASSET, TELEMETRY_ANALYTICS, PREFLIGHT, HEALTHCHECK)
-     * are suppressed before graph insertion.
+     * are suppressed before graph insertion, but ALL requests are persisted
+     * to the {@link RequestStore} (when configured) so the disk-backed store
+     * is the canonical record of full backfill.
      */
     public void processRequest(CapturedRequest request) {
         try {
             // 1. Classify the request
             RequestClassification classification = classifier.classify(request);
+
+            // 1a. Persist every request to the store (if wired). This
+            // is the canonical record. The hot graph below is just a
+            // working view, not the source of truth.
+            if (requestStore != null) {
+                try {
+                    RequestSummary summary = RequestStoreConversion.summaryOf(request, classification);
+                    RawHttp raw = RequestStoreConversion.rawOf(request);
+                    requestStore.put(summary, raw);
+                    storedCount.incrementAndGet();
+                } catch (Exception e) {
+                    logger.log(LogCategory.ERROR, LogLevel.WARN, "GraphBuilder",
+                            "RequestStore put failed for " + request, e);
+                }
+            }
+
             if (!classification.isWorkflowRelevant()) {
                 // Route context-read requests to ApplicationModel before suppression
                 if (classification.isBackground()
@@ -254,7 +301,7 @@ public class GraphBuilder {
             Map<String, Object> responseData = ParameterExtractor.extractResponseData(request);
             node.setResponseData(responseData);
 
-            // 6. Add node to graph
+            // 6. Add node to graph (hot working view — not canonical)
             graph.addNode(node);
             nodesProcessed.incrementAndGet();
 
@@ -264,6 +311,16 @@ public class GraphBuilder {
                 case BUSINESS_READ: businessReadCount.incrementAndGet(); break;
                 case AUTHENTICATION: authenticationCount.incrementAndGet(); break;
                 default: break;
+            }
+
+            // 6a. Once the hot graph is large, drop the raw HTTP
+            // from each new node. The data is still in the store
+            // and can be re-hydrated via RequestStore.getRaw(id).
+            // This is what keeps the working set bounded during
+            // full backfill on 1M+ request projects.
+            if (graph.getNodeCount() > HOT_GRAPH_RAW_RETENTION) {
+                node.setRequest(null);
+                rawDropped.incrementAndGet();
             }
 
             // 7. Detect relationships with existing nodes (incremental)
@@ -291,7 +348,9 @@ public class GraphBuilder {
                 RequestGraph.GraphStats stats = graph.getStats();
                 logger.log(LogCategory.GRAPH, LogLevel.INFO, "GraphBuilder",
                         "Graph stats: " + stats
-                                + " | Suppressed: " + suppressedCount.get());
+                                + " | Suppressed: " + suppressedCount.get()
+                                + " | Stored: " + storedCount.get()
+                                + " | Raw dropped (hot-graph): " + rawDropped.get());
             }
 
         } catch (Exception e) {
@@ -306,9 +365,28 @@ public class GraphBuilder {
 
     /**
      * Save graph data to a directory as JSON files.
+     *
+     * <p>Safety guard: writing the full in-memory graph to JSON
+     * scales with node count and can OOM on large projects
+     * (1M+ nodes). When the hot graph exceeds
+     * {@link #HOT_GRAPH_RAW_RETENTION} entries, the canonical
+     * record lives in the {@link RequestStore} and the JSON
+     * graph files become a debug export only. In that mode we
+     * skip the save to avoid blowing heap during shutdown.
      */
     public void saveToDirectory(String directoryPath) {
         if (directoryPath == null || directoryPath.isEmpty()) return;
+
+        int nodeCount = graph.getNodeCount();
+        if (nodeCount > HOT_GRAPH_RAW_RETENTION) {
+            logger.log(LogCategory.GRAPH, LogLevel.WARN, "GraphBuilder",
+                    "Skipping graph JSON save: " + nodeCount
+                            + " nodes exceeds safety threshold "
+                            + "(" + HOT_GRAPH_RAW_RETENTION + "). "
+                            + "RequestStore is canonical; full graph JSON is a "
+                            + "debug export only and would risk OOM.");
+            return;
+        }
 
         try {
             File dir = new File(directoryPath);
@@ -470,6 +548,9 @@ public class GraphBuilder {
     public long getEdgesCreated() { return edgesCreated.get(); }
     public boolean isRunning() { return running.get(); }
     public long getSuppressedCount() { return suppressedCount.get(); }
+    public long getStoredCount() { return storedCount.get(); }
+    public long getRawDroppedCount() { return rawDropped.get(); }
+    public RequestStore getRequestStore() { return requestStore; }
 
     /**
      * Extract API endpoint paths from JavaScript file content using regex.
