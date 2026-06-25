@@ -113,6 +113,10 @@ public class GraphBuilder {
         // config-driven value if a config is provided.
         this.detector = new RelationshipDetector(graph, logger, 50);
         this.logger = logger;
+        // Expose the detector through the graph so HealthCheck
+        // (which has only the graph, not the builder) can read
+        // the edge-miss diagnostics.
+        graph.setRelationshipDetector(this.detector);
     }
 
     /**

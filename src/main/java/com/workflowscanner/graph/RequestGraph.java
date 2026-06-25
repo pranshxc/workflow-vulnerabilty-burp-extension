@@ -61,6 +61,11 @@ public class RequestGraph {
             edgesByType.put(t, new AtomicInteger(0));
         }
     }
+    // O(1) explicit / derived edge counters. Maintained by
+    // addEdge so the status panel can show "explicit: N,
+    // derived: N" without summing per-type maps.
+    private final AtomicInteger explicitEdgeCount = new AtomicInteger(0);
+    private final AtomicInteger derivedEdgeCount = new AtomicInteger(0);
 
     // Adjacency lists for efficient traversal. Values are queues
     // (not lists) so backfill does not pay array-copy cost. The
@@ -72,6 +77,10 @@ public class RequestGraph {
     // Optional reference for enriching graph stats with candidate counts
     private volatile WorkflowDetector workflowDetector;
     private volatile ExtensionConfig config;
+    // Optional reference to the relationship detector. Set by
+    // GraphBuilder so HealthCheck (and the status panel) can read
+    // the edge-miss diagnostics without going through GraphBuilder.
+    private volatile RelationshipDetector relationshipDetector;
 
     // --- Node Operations ---
 
@@ -101,11 +110,43 @@ public class RequestGraph {
         if (typeCounter != null) {
             typeCounter.incrementAndGet();
         }
+        if (edge.getType() != null && edge.getType().isExplicit()) {
+            explicitEdgeCount.incrementAndGet();
+        } else if (edge.getType() != null && edge.getType().isDerived()) {
+            derivedEdgeCount.incrementAndGet();
+        }
         outgoing.computeIfAbsent(edge.getSourceNodeId(), k -> new ConcurrentLinkedQueue<>())
                 .add(edge.getTargetNodeId());
         incoming.computeIfAbsent(edge.getTargetNodeId(), k -> new ConcurrentLinkedQueue<>())
                 .add(edge.getSourceNodeId());
         graphVersion++;
+    }
+
+    /**
+     * Check whether an edge of the given type already exists between
+     * the same source and target node ids. Used to deduplicate
+     * derived edges (e.g. {@code WORKFLOW_SEQUENCE}) that may be
+     * produced repeatedly when the workflow detector runs more
+     * than once on the same candidate.
+     *
+     * <p>The check is O(n) over the edges queue. That is fine for
+     * the workflow detector — it runs O(candidates) times and a
+     * single candidate is at most a few dozen steps. For hot-path
+     * callers this would be too expensive, so it is intentionally
+     * not on the addEdge path.
+     *
+     * @return true if a matching edge already exists
+     */
+    public boolean hasEdge(String sourceId, String targetId, EdgeType type) {
+        if (sourceId == null || targetId == null || type == null) return false;
+        for (RequestEdge e : edges) {
+            if (e.getType() == type
+                    && sourceId.equals(e.getSourceNodeId())
+                    && targetId.equals(e.getTargetNodeId())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public RequestNode getNode(String nodeId) {
@@ -395,6 +436,23 @@ public class RequestGraph {
     public int getEdgeCount() { return edges.size(); }
 
     /**
+     * O(1) count of "explicit" edges (REDIRECT, REFERRER,
+     * PARAM_REUSE, RESPONSE_CORRELATION, USER_DEFINED). Maintained
+     * by {@link #addEdge(RequestEdge)} and reset by {@link #clear()}.
+     * Use this in status panels so derived edges (e.g.
+     * {@code WORKFLOW_SEQUENCE}) do not inflate the
+     * "real relationship" count.
+     */
+    public int getExplicitEdgeCount() { return explicitEdgeCount.get(); }
+
+    /**
+     * O(1) count of "derived" edges (currently only
+     * {@code WORKFLOW_SEQUENCE}). Maintained by
+     * {@link #addEdge(RequestEdge)} and reset by {@link #clear()}.
+     */
+    public int getDerivedEdgeCount() { return derivedEdgeCount.get(); }
+
+    /**
      * O(1) count of nodes whose classification is workflow-relevant.
      * Workflow-relevant nodes are the ones the workflow detector
      * considers when building candidates. Nodes flagged as
@@ -469,6 +527,22 @@ public class RequestGraph {
     public WorkflowDetector getWorkflowDetector() { return workflowDetector; }
 
     /**
+     * Set the relationship detector on this graph. Called by
+     * GraphBuilder so HealthCheck can read the edge-miss
+     * diagnostics (referrer_present, param_values_reused, etc.)
+     * without going through GraphBuilder.
+     */
+    public void setRelationshipDetector(RelationshipDetector detector) {
+        this.relationshipDetector = detector;
+    }
+
+    /**
+     * Get the relationship detector wired into this graph, or null
+     * if none has been set.
+     */
+    public RelationshipDetector getDetector() { return relationshipDetector; }
+
+    /**
      * Repair nextNodeIndex to be higher than any existing node index.
      * Should be called after loading nodes from serialized state.
      */
@@ -497,6 +571,12 @@ public class RequestGraph {
                 0,            // maxComponentSize: lazy
                 0);           // hostCount: lazy
         stats.workflowRelevantNodeCount = getWorkflowRelevantNodeCount();
+        // Explicit / derived edge counts come from O(1) atomic
+        // counters maintained by addEdge(). They give the status
+        // panel an honest split between observable relationship
+        // edges and structural edges (e.g. WORKFLOW_SEQUENCE).
+        stats.explicitEdgeCount = explicitEdgeCount.get();
+        stats.derivedEdgeCount = derivedEdgeCount.get();
         // Candidate counts come from the workflow detector's live
         // counters (updated by both preview and detect paths). The
         // "analysis-ready" split is computed against the live total.
@@ -551,6 +631,8 @@ public class RequestGraph {
         for (AtomicInteger c : edgesByType.values()) {
             c.set(0);
         }
+        explicitEdgeCount.set(0);
+        derivedEdgeCount.set(0);
         graphVersion++;
     }
 
@@ -597,6 +679,11 @@ public class RequestGraph {
         // Edge-supported (>=1 supporting edge) vs session-only (no edges) split.
         public int edgeSupportedCandidateCount;
         public int sessionOnlyCandidateCount;
+        // Edge split: explicit (HTTP-level signals) vs derived
+        // (WORKFLOW_SEQUENCE — produced by WorkflowDetector after
+        // a candidate is finalized). Both maintained by addEdge.
+        public int explicitEdgeCount;
+        public int derivedEdgeCount;
 
         public GraphStats(int nodeCount, int edgeCount, int componentCount,
                           int maxComponentSize, int hostCount) {
@@ -610,9 +697,10 @@ public class RequestGraph {
         @Override
         public String toString() {
             StringBuilder sb = new StringBuilder();
-            sb.append(String.format("Nodes: %d (relevant: %d), Edges: %d, Components: %d, Max component: %d, Hosts: %d",
-                    nodeCount, workflowRelevantNodeCount, edgeCount, componentCount,
-                    maxComponentSize, hostCount));
+            sb.append(String.format("Nodes: %d (relevant: %d), Edges: %d (explicit: %d, derived: %d), Components: %d, Max component: %d, Hosts: %d",
+                    nodeCount, workflowRelevantNodeCount, edgeCount,
+                    explicitEdgeCount, derivedEdgeCount,
+                    componentCount, maxComponentSize, hostCount));
             if (workflowCandidateCount > 0) {
                 sb.append(String.format(
                         ", Candidates: %d (edge-supported: %d, session-only: %d, analysis-ready: %d, display-only: %d)",

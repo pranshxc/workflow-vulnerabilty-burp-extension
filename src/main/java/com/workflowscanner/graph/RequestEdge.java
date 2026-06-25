@@ -96,6 +96,27 @@ public class RequestEdge {
         return valueKind.isBusinessValue();
     }
 
+    /**
+     * Returns true if this edge represents an explicit relationship
+     * (REDIRECT, REFERRER, PARAM_REUSE, RESPONSE_CORRELATION,
+     * USER_DEFINED). Derived edges like WORKFLOW_SEQUENCE return
+     * false. Status panels and diagnostics use this to separate
+     * the "real" relationship count from the structural edges
+     * produced by WorkflowDetector.
+     */
+    public boolean isExplicit() {
+        return type != null && type.isExplicit();
+    }
+
+    /**
+     * Returns true if this edge was produced by WorkflowDetector
+     * after a candidate was finalized (currently only
+     * WORKFLOW_SEQUENCE).
+     */
+    public boolean isDerived() {
+        return type != null && type.isDerived();
+    }
+
     @Override
     public String toString() {
         StringBuilder sb = new StringBuilder();

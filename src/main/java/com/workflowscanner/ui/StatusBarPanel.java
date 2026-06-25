@@ -97,10 +97,13 @@ public class StatusBarPanel extends JPanel {
 
             String nodes = metrics.getOrDefault("graph_nodes", "?");
             String edges = metrics.getOrDefault("graph_edges", "?");
+            String explicitEdges = metrics.getOrDefault("explicit_edges", "0");
+            String derivedEdges = metrics.getOrDefault("derived_edges", "0");
             String relevant = metrics.getOrDefault("workflow_relevant_requests", "?");
             String storedReq = metrics.getOrDefault("stored_requests", "0");
             graphLabel.setText("Graph: " + nodes + "n/" + edges
-                    + "e (relevant: " + relevant + ", stored: " + storedReq + ")");
+                    + "e (explicit:" + explicitEdges + " derived:" + derivedEdges
+                    + " rel:" + relevant + " stored:" + storedReq + ")");
 
             String candidates = metrics.getOrDefault("workflow_candidates", "?");
             String edgeSupp = metrics.getOrDefault("edge_supported_candidates", "?");
@@ -108,14 +111,17 @@ public class StatusBarPanel extends JPanel {
             String analysisReady = metrics.getOrDefault("analysis_ready_candidates", "?");
             String displayOnly = metrics.getOrDefault("display_only_candidates", "?");
             candidatesLabel.setText("Candidates: " + candidates);
-            // Format: "(edge:N session:N) [P:N Rd:N Rf:N C:N U:N] (ready:N display:N)"
+            // Format: "(edge:N session:N) [P:N Rd:N Rf:N C:N U:N Wf:N] (ready:N display:N)"
+            // Wf = WORKFLOW_SEQUENCE derived edges.
             String p = metrics.getOrDefault("edges_by_type_PARAM_REUSE", "0");
             String rd = metrics.getOrDefault("edges_by_type_REDIRECT", "0");
             String rf = metrics.getOrDefault("edges_by_type_REFERRER", "0");
             String c = metrics.getOrDefault("edges_by_type_RESPONSE_CORRELATION", "0");
             String u = metrics.getOrDefault("edges_by_type_USER_DEFINED", "0");
+            String wf = metrics.getOrDefault("edges_by_type_WORKFLOW_SEQUENCE", "0");
             edgesBreakdownLabel.setText(" (edge: " + edgeSupp + ", session: " + sessionOnly
-                    + ") [P:" + p + " Rd:" + rd + " Rf:" + rf + " C:" + c + " U:" + u + "]"
+                    + ") [P:" + p + " Rd:" + rd + " Rf:" + rf + " C:" + c + " U:" + u
+                    + " Wf:" + wf + "]"
                     + " (ready:" + analysisReady + " display:" + displayOnly + ")");
 
             String analyzed = metrics.getOrDefault("analyzed_chains", "?");
@@ -132,15 +138,33 @@ public class StatusBarPanel extends JPanel {
             String suppressed = metrics.getOrDefault("suppressed_total", "?");
             suppressedLabel.setText("Suppressed: " + suppressed);
 
-            // Diagnostic: zero edges with non-zero candidates usually
-            // means edge building never ran. Surface it in red so it
-            // is impossible to miss.
+            // Diagnostic: zero explicit edges with non-zero
+            // candidates usually means the explicit edge
+            // detection heuristics (referrer, param reuse,
+            // cookie correlation) found nothing. Surface it in
+            // red so it is impossible to miss. The warning now
+            // reads "explicit=0 but candidates=N" so derived
+            // WORKFLOW_SEQUENCE edges are not counted as
+            // relationship evidence.
             String warning = metrics.getOrDefault("edges_no_candidate_warning", "0");
             boolean show = "1".equals(warning);
             diagnosticLabel.setVisible(show);
             if (show) {
-                diagnosticLabel.setText(" \u26A0 edges=0 but candidates=" + candidates
-                        + " — run Edge Rebuild");
+                // Build a short breakdown of the edge-miss
+                // diagnostics so the user sees *why* the explicit
+                // edges are zero, not just *that* they are zero.
+                String referrerP = metrics.getOrDefault("diag_referrer_present", "0");
+                String referrerM = metrics.getOrDefault("diag_referrer_matched", "0");
+                String paramC = metrics.getOrDefault("diag_param_values_checked", "0");
+                String paramR = metrics.getOrDefault("diag_param_values_reused", "0");
+                String cookieC = metrics.getOrDefault("diag_non_session_cookies_checked", "0");
+                String cookieR = metrics.getOrDefault("diag_non_session_cookies_correlated", "0");
+                String respIdx = metrics.getOrDefault("diag_response_values_indexed", "0");
+                diagnosticLabel.setText(" \u26A0 explicit=0 but candidates=" + candidates
+                        + " — Rf:" + referrerM + "/" + referrerP
+                        + " P:" + paramR + "/" + paramC
+                        + " C:" + cookieR + "/" + cookieC
+                        + " RespIdx:" + respIdx);
             }
 
         } catch (Exception ignored) {

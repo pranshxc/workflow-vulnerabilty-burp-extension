@@ -157,6 +157,8 @@ public class HealthCheck {
         metrics.put("pipeline_capacity", pipeline != null ? String.valueOf(pipeline.getTotalSubmitted()) : "?");
 
         int edgeCount = (graph != null) ? graph.getEdgeCount() : 0;
+        int explicitEdges = (graph != null) ? graph.getExplicitEdgeCount() : 0;
+        int derivedEdges = (graph != null) ? graph.getDerivedEdgeCount() : 0;
         int nodeCount = (graph != null) ? graph.getNodeCount() : 0;
         int relevantCount = (graph != null) ? graph.getWorkflowRelevantNodeCount() : 0;
         // Real candidate count from detector, not connected components.
@@ -175,6 +177,8 @@ public class HealthCheck {
 
         metrics.put("graph_nodes", String.valueOf(nodeCount));
         metrics.put("graph_edges", String.valueOf(edgeCount));
+        metrics.put("explicit_edges", String.valueOf(explicitEdges));
+        metrics.put("derived_edges", String.valueOf(derivedEdges));
         metrics.put("graph_components", "0"); // lazy; populated by on-demand call
         metrics.put("workflow_relevant_requests", String.valueOf(relevantCount));
         metrics.put("workflow_candidates", String.valueOf(candidateCount));
@@ -188,6 +192,20 @@ public class HealthCheck {
             for (com.workflowscanner.graph.EdgeType t : com.workflowscanner.graph.EdgeType.values()) {
                 metrics.put("edges_by_type_" + t.name(),
                         String.valueOf(byType.getOrDefault(t, 0)));
+            }
+        }
+
+        // Edge-miss diagnostics from the relationship detector. These
+        // explain *why* the explicit edge count is zero: e.g. "0
+        // referrers matched" vs "50 referrers present but none
+        // matched" tells the user whether the referrer target is
+        // uncaptured, vs whether the Referer header is not even
+        // being sent. Surfaced to the UI through stable keys.
+        if (graph != null && graph.getDetector() != null) {
+            com.workflowscanner.graph.RelationshipDetector det = graph.getDetector();
+            java.util.Map<String, Long> diag = det.getEdgeMissDiagnostics();
+            for (java.util.Map.Entry<String, Long> e : diag.entrySet()) {
+                metrics.put("diag_" + e.getKey(), String.valueOf(e.getValue()));
             }
         }
 
@@ -205,10 +223,14 @@ public class HealthCheck {
             metrics.put("stored_disk_bytes", "0");
         }
 
-        // Diagnostic: zero edges with non-zero candidates usually means
-        // edge building never ran (backfill-only project, edge index
-        // rebuild required, etc.). Surface it as an explicit key.
-        boolean edgeMissing = edgeCount == 0 && candidateCount > 0;
+        // Diagnostic: zero explicit edges with non-zero candidates
+        // usually means the explicit edge detection heuristics
+        // (referrer, param reuse, cookie correlation) found
+        // nothing. Surface it as an explicit key. We use
+        // explicitEdges (not total edgeCount) so the warning does
+        // not fire when derived WORKFLOW_SEQUENCE edges exist —
+        // those are expected and not a problem.
+        boolean edgeMissing = explicitEdges == 0 && candidateCount > 0;
         metrics.put("edges_no_candidate_warning", edgeMissing ? "1" : "0");
 
         // Live validation counts from the workflow detector.

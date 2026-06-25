@@ -13,10 +13,12 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.HexFormat;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Detects relationships between request nodes using five heuristics.
@@ -68,6 +70,30 @@ public class RelationshipDetector {
     // with the request count.
     private final int indexMaxPerKey;
 
+    // ========================================================================
+    // Edge-miss diagnostics
+    //
+    // These counters are updated by the detection paths and
+    // surfaced via {@link #getEdgeMissDiagnostics()} so the
+    // status panel and the health check can explain *why* explicit
+    // edges stay at zero. The common pattern in modern apps is
+    // "edges = 0 but candidates > 0" because the referrer points
+    // to a static/SPA page that is not captured, response bodies
+    // are encrypted or have no extractable IDs, and the only
+    // repeated cookie is a session token. Without these counters
+    // it is impossible to tell which heuristic is failing.
+    // ========================================================================
+    private final AtomicLong diagReferrerPresent = new AtomicLong(0);
+    private final AtomicLong diagReferrerMatched = new AtomicLong(0);
+    private final AtomicLong diagRedirectSeen = new AtomicLong(0);
+    private final AtomicLong diagRedirectMatched = new AtomicLong(0);
+    private final AtomicLong diagParamValuesChecked = new AtomicLong(0);
+    private final AtomicLong diagParamValuesReused = new AtomicLong(0);
+    private final AtomicLong diagNonSessionCookiesChecked = new AtomicLong(0);
+    private final AtomicLong diagNonSessionCookiesCorrelated = new AtomicLong(0);
+    private final AtomicLong diagResponseValuesIndexed = new AtomicLong(0);
+    private final AtomicLong diagNodesProcessed = new AtomicLong(0);
+
     // Session cookie names that should never create workflow edges
     private static final Set<String> SESSION_COOKIE_NAMES = Set.of(
             "jsessionid", "phpsessid", "connect.sid", "session", "_auth",
@@ -93,6 +119,7 @@ public class RelationshipDetector {
      */
     public List<RequestEdge> detectRelationships(RequestNode newNode) {
         List<RequestEdge> newEdges = new ArrayList<>();
+        diagNodesProcessed.incrementAndGet();
 
         newEdges.addAll(detectRedirectChains(newNode));
         newEdges.addAll(detectReferrerLinks(newNode));
@@ -144,6 +171,14 @@ public class RelationshipDetector {
                 return EdgeStrength.MEDIUM;
             case TIME_WINDOW:
                 return EdgeStrength.WEAK;
+            case WORKFLOW_SEQUENCE:
+                // Derived structural edge — WorkflowDetector produced
+                // it from a candidate's step order, not from an
+                // observable HTTP signal. WEAK means it does not
+                // contribute to candidate merging on its own. The
+                // candidate's score drives the edge confidence
+                // (already encoded on the edge itself).
+                return EdgeStrength.WEAK;
             default:
                 return EdgeStrength.WEAK;
         }
@@ -171,6 +206,8 @@ public class RelationshipDetector {
 
     private List<RequestEdge> detectRedirectChains(RequestNode newNode) {
         List<RequestEdge> edges = new ArrayList<>();
+        boolean sawRedirect = newNode.isRedirect();
+        boolean matchedRedirect = false;
 
         // Walk the existing index for redirect producers whose
         // Location header matches this new URL, and redirect
@@ -191,6 +228,7 @@ public class RelationshipDetector {
                                 EdgeType.REDIRECT, 1.0,
                                 newNode.getStatusCode() + " Location: " + location
                                         + " -> " + existing.getMethod() + " " + existing.getUrl()));
+                        matchedRedirect = true;
                     }
                 }
             }
@@ -209,6 +247,7 @@ public class RelationshipDetector {
                 RequestNode existing = graph.getNode(existingId);
                 if (existing == null) continue;
                 if (!existing.isRedirect()) continue;
+                sawRedirect = true;
                 String location = existing.getRedirectLocation();
                 if (location != null && urlMatches(location, newNode.getUrl())) {
                     edges.add(new RequestEdge(
@@ -216,9 +255,12 @@ public class RelationshipDetector {
                             EdgeType.REDIRECT, 1.0,
                             existing.getStatusCode() + " Location: " + location
                                     + " -> " + newNode.getMethod() + " " + newNode.getUrl()));
+                    matchedRedirect = true;
                 }
             }
         }
+        if (sawRedirect) diagRedirectSeen.incrementAndGet();
+        if (matchedRedirect) diagRedirectMatched.incrementAndGet();
         return edges;
     }
 
@@ -233,29 +275,38 @@ public class RelationshipDetector {
     private List<RequestEdge> detectReferrerLinks(RequestNode newNode) {
         List<RequestEdge> edges = new ArrayList<>();
         String referrer = newNode.getReferrer();
-        if (referrer == null || referrer.isEmpty()) return edges;
+        boolean hasReferrer = referrer != null && !referrer.isEmpty();
+        boolean matched = false;
 
-        // Find existing node whose URL matches the referrer.
-        Deque<String> existingIds = urlIndex.get(normalizeUrl(referrer));
-        if (existingIds != null) {
-            for (String existingId : existingIds) {
-                if (existingId.equals(newNode.getId())) continue;
-                RequestNode existing = graph.getNode(existingId);
-                if (existing == null) continue;
-                if (!urlMatches(referrer, existing.getUrl())) continue;
-                double confidence = isBusinessRelevant(newNode) ? 0.85 : 0.5;
-                edges.add(new RequestEdge(
-                        existing.getId(), newNode.getId(),
-                        EdgeType.REFERRER, confidence,
-                        "Referer header: " + referrer + " matches " + existing.getUrl()));
-                break;   // first match wins
+        if (hasReferrer) {
+            diagReferrerPresent.incrementAndGet();
+
+            // Find existing node whose URL matches the referrer.
+            Deque<String> existingIds = urlIndex.get(normalizeUrl(referrer));
+            if (existingIds != null) {
+                for (String existingId : existingIds) {
+                    if (existingId.equals(newNode.getId())) continue;
+                    RequestNode existing = graph.getNode(existingId);
+                    if (existing == null) continue;
+                    if (!urlMatches(referrer, existing.getUrl())) continue;
+                    double confidence = isBusinessRelevant(newNode) ? 0.85 : 0.5;
+                    edges.add(new RequestEdge(
+                            existing.getId(), newNode.getId(),
+                            EdgeType.REFERRER, confidence,
+                            "Referer header: " + referrer + " matches " + existing.getUrl()));
+                    matched = true;
+                    break;   // first match wins
+                }
             }
         }
 
         // Reverse direction: find existing nodes whose referrer
         // matches this new URL. Walk the bounded URL index for the
         // new URL and check the corresponding node's lightweight
-        // referrer field.
+        // referrer field. This is the more common case in modern
+        // apps: the request that *fired first* had no referrer in
+        // the captured set, but a later request's URL matches an
+        // earlier request's Referer. We still credit that.
         if (newNode.getUrl() != null) {
             Deque<String> candidates = urlIndex.get(normalizeUrl(newNode.getUrl()));
             if (candidates != null) {
@@ -266,16 +317,19 @@ public class RelationshipDetector {
                     String existingReferrer = existing.getReferrer();
                     if (existingReferrer != null
                             && urlMatches(existingReferrer, newNode.getUrl())) {
+                        diagReferrerPresent.incrementAndGet();
                         double confidence = isBusinessRelevant(existing) ? 0.85 : 0.5;
                         edges.add(new RequestEdge(
                                 newNode.getId(), existing.getId(),
                                 EdgeType.REFERRER, confidence,
                                 "Referer header: " + existingReferrer
                                         + " matches " + newNode.getUrl()));
+                        matched = true;
                     }
                 }
             }
         }
+        if (matched) diagReferrerMatched.incrementAndGet();
         return edges;
     }
 
@@ -296,6 +350,7 @@ public class RelationshipDetector {
             // Filter through ValueKind — only correlation-relevant values create edges
             if (!ParameterExtractor.isInterestingCorrelationValue(paramName, paramValue)) continue;
 
+            diagParamValuesChecked.incrementAndGet();
             Deque<String> sourceNodeIds = responseValueIndex.get(paramValue);
             if (sourceNodeIds == null) continue;
 
@@ -317,6 +372,7 @@ public class RelationshipDetector {
                 edge.setParamName(paramName);
                 edge.setValueHash(sha256(paramValue));
                 edges.add(edge);
+                diagParamValuesReused.incrementAndGet();
             }
         }
         return edges;
@@ -338,6 +394,7 @@ public class RelationshipDetector {
             // Skip session cookies — they don't indicate workflow relationships
             if (SESSION_COOKIE_NAMES.contains(cookieName)) continue;
 
+            diagNonSessionCookiesChecked.incrementAndGet();
             String cookieValue = entry.getValue().toString();
 
             // Look up bounded producer list for this cookie name.
@@ -359,6 +416,7 @@ public class RelationshipDetector {
                 edge.setValueHash(sha256(cookieValue));
                 edge.setValueKind(ValueKind.classify(cookieName, cookieValue));
                 edges.add(edge);
+                diagNonSessionCookiesCorrelated.incrementAndGet();
             }
         }
         return edges;
@@ -398,6 +456,7 @@ public class RelationshipDetector {
         Set<String> values = ParameterExtractor.getInterestingValues(node.getResponseData());
         for (String value : values) {
             pushBounded(responseValueIndex, value, node.getId());
+            diagResponseValuesIndexed.incrementAndGet();
         }
     }
 
@@ -459,6 +518,32 @@ public class RelationshipDetector {
     public int getUrlIndexSize() { return urlIndex.size(); }
     public int getGroupIndexSize() { return groupIndex.size(); }
     public int getCookieSetIndexSize() { return cookieSetIndex.size(); }
+
+    /**
+     * Edge-miss diagnostic counters. The status panel and
+     * HealthCheck read this map to explain *why* the explicit
+     * edge count is zero (e.g. "0 referrers matched" vs "50
+     * referrers present but none matched" tells the user
+     * whether the referrer target is uncaptured, vs whether
+     * the Referer header is not even being sent by the app).
+     *
+     * <p>Keys are stable so the UI can read them by name and
+     * absent keys read as 0.
+     */
+    public Map<String, Long> getEdgeMissDiagnostics() {
+        Map<String, Long> out = new LinkedHashMap<>();
+        out.put("nodes_processed", diagNodesProcessed.get());
+        out.put("referrer_present", diagReferrerPresent.get());
+        out.put("referrer_matched", diagReferrerMatched.get());
+        out.put("redirect_seen", diagRedirectSeen.get());
+        out.put("redirect_matched", diagRedirectMatched.get());
+        out.put("param_values_checked", diagParamValuesChecked.get());
+        out.put("param_values_reused", diagParamValuesReused.get());
+        out.put("non_session_cookies_checked", diagNonSessionCookiesChecked.get());
+        out.put("non_session_cookies_correlated", diagNonSessionCookiesCorrelated.get());
+        out.put("response_values_indexed", diagResponseValuesIndexed.get());
+        return out;
+    }
 
     /**
      * Simple value-object for cookie producers stored in the bounded

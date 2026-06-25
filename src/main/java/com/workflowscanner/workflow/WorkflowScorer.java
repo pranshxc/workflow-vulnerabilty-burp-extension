@@ -93,6 +93,12 @@ public class WorkflowScorer {
     private double scoreObjectFlows(WorkflowCandidate candidate) {
         double score = 0.0;
         for (RequestEdge edge : candidate.getSupportingEdges()) {
+            // WORKFLOW_SEQUENCE is intentionally NOT scored here —
+            // it is a derived structural edge produced by
+            // WorkflowDetector after a candidate is finalized, not
+            // a real object-flow signal. Adding it would let
+            // session-derived candidates double-count the
+            // "workflow exists" signal as object-flow evidence.
             if (edge.getType() == EdgeType.PARAM_REUSE) score += 6.0;
             else if (edge.getType() == EdgeType.RESPONSE_CORRELATION) score += 4.0;
             else if (edge.getType() == EdgeType.REDIRECT) score += 2.0;
@@ -173,7 +179,13 @@ public class WorkflowScorer {
 
     private double penalizeWeakStructure(List<RequestNode> steps,
                                           List<RequestEdge> edges) {
-        // If the only edges are TIME_WINDOW, penalize heavily
+        // If the only edges are TIME_WINDOW (a context-only edge
+        // type RelationshipDetector no longer emits), penalize
+        // heavily. WORKFLOW_SEQUENCE is a derived structural edge
+        // and does not by itself indicate weak structure — it is
+        // added after the candidate is finalized, so applying a
+        // penalty here would penalize every session-derived
+        // candidate, which is the opposite of the intended UX.
         if (edges != null && !edges.isEmpty()) {
             boolean onlyTimeWindow = edges.stream()
                     .allMatch(e -> e.getType() == EdgeType.TIME_WINDOW);

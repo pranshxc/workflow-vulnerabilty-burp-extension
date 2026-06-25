@@ -544,7 +544,9 @@ public class SettingsPanel extends JPanel {
             StringBuilder statsText = new StringBuilder("Status: ")
                     .append(stats.nodeCount).append(" nodes (relevant: ")
                     .append(stats.workflowRelevantNodeCount).append("), ")
-                    .append(stats.edgeCount).append(" edges");
+                    .append(stats.edgeCount).append(" edges (explicit: ")
+                    .append(stats.explicitEdgeCount).append(", derived: ")
+                    .append(stats.derivedEdgeCount).append(")");
             if (stats.workflowCandidateCount > 0) {
                 statsText.append(", ").append(stats.workflowCandidateCount)
                         .append(" candidates (edge: ").append(stats.edgeSupportedCandidateCount)

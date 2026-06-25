@@ -711,6 +711,11 @@ public class GraphPanel extends JPanel {
                 case RESPONSE_CORRELATION: return new Color(150, 0, 200);
                 case TIME_WINDOW: return Color.GRAY;
                 case USER_DEFINED: return Color.CYAN;
+                // Derived structural edge — visibly distinct from
+                // explicit edges so the user can tell at a glance
+                // which chain connections are "real" vs produced
+                // by the workflow detector from candidate order.
+                case WORKFLOW_SEQUENCE: return new Color(180, 90, 180);
                 default: return Color.LIGHT_GRAY;
             }
         }

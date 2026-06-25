@@ -239,6 +239,16 @@ public class WorkflowDetector {
         // 7. Prioritize
         List<WorkflowCandidate> prioritized = scorer.prioritize(merged);
 
+        // 8. Build derived workflow-sequence edges between consecutive
+        // steps in each candidate. This gives the graph a usable
+        // structure even when RelationshipDetector found no explicit
+        // relationship edges. The edges are tagged
+        // EdgeType.WORKFLOW_SEQUENCE so the status panel and the
+        // scorer can separate them from "real" relationship edges.
+        for (WorkflowCandidate candidate : prioritized) {
+            buildWorkflowSequenceEdges(candidate, graph);
+        }
+
         logger.log(LogCategory.GRAPH, LogLevel.INFO, "WorkflowDetector",
                 "Edge-aware detection: " + prioritized.size()
                         + " candidates (merged from " + segmented.size()
@@ -609,6 +619,16 @@ public class WorkflowDetector {
         // 4. Prioritize by score
         List<WorkflowCandidate> prioritized = scorer.prioritize(candidates);
 
+        // 4a. Build derived workflow-sequence edges between
+        // consecutive steps in each candidate. The same code path
+        // is used by the edge-aware detector so the graph shows
+        // useful structure for session-only candidates too.
+        if (graph != null) {
+            for (WorkflowCandidate candidate : prioritized) {
+                buildWorkflowSequenceEdges(candidate, graph);
+            }
+        }
+
         // 5. Log summary
         long aboveThreshold = prioritized.stream()
                 .filter(c -> c.getWorkflowScore() >= analysisThreshold)
@@ -627,6 +647,68 @@ public class WorkflowDetector {
         if (publish) publishCandidates(prioritized);
         if (updateLastResults) lastResults = prioritized;
         return prioritized;
+    }
+
+    /**
+     * Build derived {@code WORKFLOW_SEQUENCE} edges between
+     * consecutive steps in a workflow candidate and add them to
+     * the graph. The edges are tagged separately from
+     * RelationshipDetector's output so the status panel and
+     * scorer can keep "real" relationships and "structural"
+     * workflow sequence edges distinct.
+     *
+     * <p>Confidence is derived from the candidate's score
+     * (capped at 0.55-0.75) — these are derived edges, not
+     * strong object-flow evidence. We do not boost the candidate
+     * score for them (see {@code WorkflowScorer.scoreObjectFlows}).
+     *
+     * <p>Duplicates are dropped via {@link RequestGraph#hasEdge}
+     * so re-running the detector (preview or full) does not
+     * produce duplicate sequence edges.
+     */
+    private void buildWorkflowSequenceEdges(WorkflowCandidate candidate,
+                                            RequestGraph graph) {
+        if (candidate == null || graph == null) return;
+        List<RequestNode> steps = candidate.getSteps();
+        if (steps == null || steps.size() < 2) return;
+
+        // Confidence from candidate score, clamped to a derived-edge
+        // range. We never go below 0.55 (so a low-score candidate
+        // still has a meaningful chain) and never above 0.75 (so
+        // derived edges never masquerade as strong object-flow).
+        double score = candidate.getWorkflowScore();
+        double confidence = Math.min(0.75, Math.max(0.55, score / 100.0));
+        String evidencePrefix = "Consecutive workflow candidate steps: candidate="
+                + candidate.getId() + ", type=" + candidate.getWorkflowType()
+                + ", score=" + String.format("%.1f", score);
+
+        int added = 0;
+        for (int i = 0; i < steps.size() - 1; i++) {
+            RequestNode a = steps.get(i);
+            RequestNode b = steps.get(i + 1);
+            if (a == null || b == null) continue;
+            String sourceId = a.getId();
+            String targetId = b.getId();
+            if (sourceId == null || targetId == null) continue;
+            // Skip self-loops (should not happen, but defensive).
+            if (sourceId.equals(targetId)) continue;
+            // Dedup: don't add a sequence edge if we already have one.
+            if (graph.hasEdge(sourceId, targetId, EdgeType.WORKFLOW_SEQUENCE)) {
+                continue;
+            }
+            RequestEdge edge = new RequestEdge(
+                    sourceId, targetId,
+                    EdgeType.WORKFLOW_SEQUENCE, confidence,
+                    evidencePrefix);
+            graph.addEdge(edge);
+            added++;
+        }
+        if (added > 0) {
+            logger.log(LogCategory.GRAPH, LogLevel.DEBUG, "WorkflowDetector",
+                    "Built " + added + " WORKFLOW_SEQUENCE edges for candidate "
+                            + candidate.getId() + " (score=" + String.format("%.1f", score)
+                            + ")");
+        }
     }
 
     /**
