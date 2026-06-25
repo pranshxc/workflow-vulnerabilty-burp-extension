@@ -128,44 +128,88 @@ public class PrivateContextDetector {
                 .collect(java.util.stream.Collectors.toSet());
         for (String name : headers.keySet()) {
             if (name == null) continue;
-            if (lowered.contains(name.toLowerCase(Locale.ROOT))) {
-                // Cookie header alone does not prove auth-bound — it
-                // could be a tracking cookie. Look for an actual
-                // value indicating session.
-                List<String> values = headers.get(name);
-                if (values == null || values.isEmpty()) return true;
-                String v = String.join(";", values).toLowerCase(Locale.ROOT);
-                if ("cookie".equalsIgnoreCase(name)) {
-                    // Cookie is auth-bound only if it carries a
-                    // session-like or known private cookie.
-                    if (looksLikeAuthCookie(v)) return true;
-                } else {
-                    // Authorization / X-Auth-Token / etc — any
-                    // non-empty value is sufficient.
-                    return true;
-                }
+            String lname = name.toLowerCase(Locale.ROOT);
+            if (!lowered.contains(lname)) continue;
+
+            List<String> values = headers.get(name);
+            if (values == null || values.isEmpty()) return true;
+            String v = String.join(";", values);
+
+            if ("cookie".equals(lname)) {
+                // Cookie header: parse into individual cookies and
+                // require at least one NON-tracking cookie to be
+                // present. Anti-bot / tracking cookies alone do NOT
+                // count as private context.
+                if (cookieHeaderHasAuthContext(v)) return true;
+            } else {
+                // Authorization / X-Auth-Token / etc — any non-empty
+                // value is sufficient.
+                return true;
             }
         }
         return false;
     }
 
     /**
-     * True if the cookie value contains a session / auth token-like
-     * entry. We look for the presence of a private cookie NAME in the
-     * value (e.g. "session=", "sid=", "auth=", or any non-tracking
-     * cookie) as a proxy for "this is an authenticated request".
+     * True if the Cookie header value contains at least one cookie
+     * whose name is NOT in the anti-bot / tracking
+     * {@link NoiseRulesConfig#getInfrastructureCookieNames()} list.
+     *
+     * <p>The check is per-cookie, not per-header: a header like
+     * {@code Cookie: __cf_bm=abc; session=xyz} is auth-bound because
+     * the {@code session} cookie is present. A header like
+     * {@code Cookie: __cf_bm=abc; _ga=GA1.2.123} is NOT
+     * auth-bound because both cookies are anti-bot/tracking.
+     *
+     * <p>If a cookie name matches an entry in
+     * {@link NoiseRulesConfig#getAuthSessionCookieNames()} (e.g.
+     * {@code session}, {@code JSESSIONID}, {@code PHPSESSID},
+     * {@code connect.sid}, {@code auth}, {@code token}, {@code jwt}),
+     * the header is auth-bound.
+     *
+     * <p>Unknown cookies that don't match either list are treated
+     * as potentially auth-bound (most apps ship a session cookie
+     * the heuristic doesn't know about).
      */
-    private boolean looksLikeAuthCookie(String cookieValue) {
+    private boolean cookieHeaderHasAuthContext(String cookieValue) {
         if (cookieValue == null || cookieValue.isEmpty()) return false;
-        for (String name : config.getInfrastructureCookieNames()) {
-            // Infra cookies do NOT make a session auth-bound.
-            if (cookieValue.contains(name + "=") || cookieValue.startsWith(name + "=")) {
-                return false;
+        String[] cookies = cookieValue.split(";");
+        boolean sawAtLeastOneCookie = false;
+        for (String raw : cookies) {
+            String trimmed = raw.trim();
+            if (trimmed.isEmpty()) continue;
+            sawAtLeastOneCookie = true;
+            int eq = trimmed.indexOf('=');
+            String name = eq < 0 ? trimmed : trimmed.substring(0, eq);
+            String lname = name.toLowerCase(Locale.ROOT);
+            if (lname.isEmpty()) continue;
+            // Anti-bot / tracking cookie — does NOT make header
+            // auth-bound, but it does not block other cookies
+            // from making it auth-bound.
+            if (matchesAnyPrefix(lname, config.getInfrastructureCookieNames())) {
+                continue;
             }
+            // Session-like / auth-like cookie → header is auth-bound.
+            if (matchesAnyPrefix(lname, config.getAuthSessionCookieNames())) {
+                return true;
+            }
+            // Unknown cookie — treat as potentially auth-bound.
+            // Most apps ship at least one session cookie; better
+            // to over-report private context than to miss a real
+            // authenticated request.
+            return true;
         }
-        // Heuristic: any non-empty cookie that is not pure tracking
-        // is treated as auth-bound. Most apps use cookies for auth.
-        return true;
+        return false;
+    }
+
+    private static boolean matchesAnyPrefix(String name, List<String> patterns) {
+        if (name == null || patterns == null) return false;
+        for (String p : patterns) {
+            if (p == null) continue;
+            String pl = p.toLowerCase(Locale.ROOT);
+            if (name.equals(pl) || name.startsWith(pl)) return true;
+        }
+        return false;
     }
 
     private boolean hasPrivateResponseField(String body) {

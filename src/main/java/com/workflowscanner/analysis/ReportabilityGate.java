@@ -193,13 +193,34 @@ public class ReportabilityGate {
 
         boolean readOnly = !hasStateChanging;
         boolean sessionOnly = !hasExplicitEdges;
-        boolean isInfrastructurePolling = candidate.getSteps() != null
-                && candidate.getSteps().stream().anyMatch(n ->
-                        n.getClassification() != null
-                                && (n.getClassification().getIntent()
-                                        == com.workflowscanner.classification.RequestIntent.TELEMETRY_ANALYTICS
-                                || n.getClassification().getIntent()
-                                        == com.workflowscanner.classification.RequestIntent.BACKGROUND_POLLING));
+        // === P0-CORRECTNESS: infrastructure polling ratio ===
+        // A real workflow can contain incidental telemetry / feature
+        // flag / polling requests (e.g. a POST /checkout candidate
+        // that triggered a GET /feature-flags call). Suppressing the
+        // whole candidate because ONE step is telemetry would hide
+        // real findings. We only suppress when the candidate is
+        // overwhelmingly infrastructure AND has no other signal.
+        java.util.Set<com.workflowscanner.classification.RequestIntent> INFRA_INTENTS = java.util.Set.of(
+                com.workflowscanner.classification.RequestIntent.TELEMETRY_ANALYTICS,
+                com.workflowscanner.classification.RequestIntent.FEATURE_FLAG_CONFIG,
+                com.workflowscanner.classification.RequestIntent.BACKGROUND_POLLING,
+                com.workflowscanner.classification.RequestIntent.THIRD_PARTY);
+        int totalSteps = candidate.getSteps() != null ? candidate.getSteps().size() : 0;
+        long infraSteps = candidate.getSteps() != null
+                ? candidate.getSteps().stream()
+                        .filter(n -> n.getClassification() != null
+                                && INFRA_INTENTS.contains(n.getClassification().getIntent()))
+                        .count()
+                : 0L;
+        double infraRatio = totalSteps == 0 ? 0.0 : (double) infraSteps / (double) totalSteps;
+        boolean chainHasPrivateContext = privateContextDetector.chainHasPrivateContext(
+                candidate.getSteps());
+        boolean isInfrastructureOnly = totalSteps > 0
+                && infraRatio >= 0.8
+                && !hasStateChanging
+                && !hasStrictConfirmation
+                && !hasProbableValidation
+                && !chainHasPrivateContext;
 
         // (1) Strict confirmation always wins. Any CONFIRMED test
         //     means the business effect was observed.
@@ -208,14 +229,19 @@ public class ReportabilityGate {
                     customReason + " (strict confirmation)");
         }
 
-        // (2) Infrastructure polling pattern: telemetry, feature
-        //     flags, /collect, /metrics. The candidate contains at
-        //     least one step classified as TELEMETRY_ANALYTICS or
-        //     BACKGROUND_POLLING.
-        if (isInfrastructurePolling) {
+        // (2) Infrastructure polling pattern. Requires that the
+        //     candidate is OVERWHELMINGLY infrastructure: >= 80% of
+        //     steps are telemetry/feature-flag/polling/third-party,
+        //     AND there is no state-changing business step, AND
+        //     there is no strict/probable validation, AND the chain
+        //     carries no private context. Without these guards, a
+        //     real workflow containing one incidental telemetry
+        //     call would be suppressed.
+        if (isInfrastructureOnly) {
             return suppress(verdict, candidate,
                     ReportabilityDecision.SUPPRESS_INFRASTRUCTURE_POLLING,
-                    customReason + " (telemetry / feature-flag / polling endpoint in chain)");
+                    customReason + " (infra-only chain: "
+                            + infraSteps + "/" + totalSteps + " steps telemetry/feature-flag/polling)");
         }
 
         // (3) Public-resource pattern: a read-only public data lookup
@@ -262,9 +288,18 @@ public class ReportabilityGate {
             }
         }
 
-        // (6) Unconfirmed finding (no strict, no probable) AND
+        // (6) Unconfirmed finding: NO strict confirmation AND
         //     user has not opted in to unconfirmed reports.
-        if (!hasStrictConfirmation && !hasProbableValidation) {
+        //     === P0-CORRECTNESS ===
+        //     The previous logic only suppressed when both strict
+        //     AND probable were missing, so PROBABLE alone
+        //     created a REPORT_NEEDS_REVIEW issue even with
+        //     reportUnconfirmedFindings=false. The config name says
+        //     "unconfirmed"; PROBABLE is not confirmed, so we
+        //     suppress it too. To get a PROBABLE finding as a
+        //     REPORT_NEEDS_REVIEW, the user must explicitly set
+        //     reportUnconfirmedFindings=true.
+        if (!hasStrictConfirmation) {
             if (!config.isReportUnconfirmedFindings()) {
                 return suppress(verdict, candidate,
                         ReportabilityDecision.SUPPRESS_UNCONFIRMED,

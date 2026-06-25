@@ -203,6 +203,13 @@ public class NoiseRulesConfig {
     // Edges (PARAM_REUSE / RESPONSE_CORRELATION) are never created
     // on these. Substring match against the cookie name; trailing
     // wildcards are added automatically.
+    //
+    // <p><b>DO NOT add application session cookies here.</b>
+    // JSESSIONID, PHPSESSID, ASP.NET_SessionId, etc. are
+    // <i>authentication</i> cookies and belong in
+    // {@link #authSessionCookieNames} instead. Putting them here
+    // would cause the PrivateContextDetector to misclassify
+    // authenticated requests as public-resource lookups.
     // ---------------------------------------------------------------
     private List<String> infrastructureCookieNames = Collections.unmodifiableList(Arrays.asList(
             // Cloudflare
@@ -212,10 +219,8 @@ public class NoiseRulesConfig {
             "nlbi_", "reese84", "reese_script",
             // PerimeterX
             "_pxvid", "_px3", "_pxde", "pxcts", "_pxhd",
-            // AWS ELB / F5 / generic
+            // AWS ELB / F5
             "awsalb", "awsalbcors", "awselb",
-            // Java app server session cookies
-            "jsessionid", "jsessionidsso", "phpsessid", "asp.net_sessionid",
             // Google Analytics
             "_ga", "_gid", "_gat", "_gcl_",
             // Hotjar
@@ -223,12 +228,49 @@ public class NoiseRulesConfig {
             // Amplitude / Segment / Mixpanel
             "amplitude_id", "amplitude_", "ajs_", "ajs_anonymous_id",
             "mp_", "rl_", "rl_anonymous_id",
-            // Generic tracking
-            "_px", "_pxvc",
             // Datadog / RUM
             "_dd_s",
             // Optimizely
             "optimizely_"
+    ));
+
+    // ---------------------------------------------------------------
+    // Cookie names that indicate an authenticated session.
+    //
+    // Presence of any of these in a request's Cookie header makes
+    // the request auth-bound for private-context detection. These
+    // are universal — they appear in Java (JSESSIONID), PHP
+    // (PHPSESSID), .NET (ASP.NET_SessionId), Express
+    // (connect.sid), generic frameworks (session, sid, token,
+    // auth, jwt, access_token, refresh_token, id_token), and
+    // many SaaS products.
+    //
+    // <p>Match semantics: a cookie name matches if it equals the
+    // pattern or starts with the pattern (so {@code session}
+    // matches {@code session}, {@code session_id},
+    // {@code sessionId}, etc.).
+    // ---------------------------------------------------------------
+    private List<String> authSessionCookieNames = Collections.unmodifiableList(Arrays.asList(
+            // Java
+            "jsessionid", "jsessionidsso",
+            // PHP
+            "phpsessid",
+            // .NET
+            "asp.net_sessionid", "aspsessionid",
+            // Express / connect
+            "connect.sid", "connect.sid.sig",
+            // Generic session / sid
+            "session", "sessionid", "session_id", "session-id",
+            "sid", "sess",
+            // Generic auth / token
+            "auth", "authentication",
+            "token", "access_token", "access-token", "accesstoken",
+            "refresh_token", "refresh-token", "refreshtoken",
+            "id_token", "id-token", "idtoken",
+            "bearer", "jwt",
+            // Common SaaS session cookies
+            "logged_in", "loggedin", "user_session", "user-session",
+            "x-xsrf-token", "csrf_token", "csrf-token"
     ));
 
     // ---------------------------------------------------------------
@@ -349,6 +391,15 @@ public class NoiseRulesConfig {
 
     public void setInfrastructureCookieNames(List<String> v) {
         this.infrastructureCookieNames = v != null ? Collections.unmodifiableList(new ArrayList<>(v))
+                : Collections.emptyList();
+    }
+
+    public List<String> getAuthSessionCookieNames() {
+        return new ArrayList<>(authSessionCookieNames);
+    }
+
+    public void setAuthSessionCookieNames(List<String> v) {
+        this.authSessionCookieNames = v != null ? Collections.unmodifiableList(new ArrayList<>(v))
                 : Collections.emptyList();
     }
 

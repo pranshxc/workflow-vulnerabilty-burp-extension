@@ -2,6 +2,7 @@ package com.workflowscanner.analysis;
 
 import com.workflowscanner.classification.NoiseRulesConfig;
 import com.workflowscanner.classification.PrivateContextDetector;
+import com.workflowscanner.classification.RequestClassification;
 import com.workflowscanner.classification.RequestIntent;
 import com.workflowscanner.classification.StaticNoiseRules;
 import com.workflowscanner.graph.RequestEdge;
@@ -82,14 +83,47 @@ public class PublicResourceClassifier {
         }
         if (!hasPublicEndpoint) return false;
 
-        // (2) No private context anywhere in the chain.
+        // (2) === P1-CORRECTNESS: all steps must be safe reads ===
+        // A real public-data candidate is read-only throughout.
+        // If any step is a business mutation (POST/PUT/PATCH/DELETE
+        // on a non-telemetry path), the candidate is a real
+        // business workflow that happens to touch a public
+        // endpoint. Suppressing it would hide IDOR / state-change
+        // bugs. The exception is known read-only infrastructure
+        // methods (OPTIONS, HEAD, GET) which are always safe.
+        for (RequestNode step : candidate.getSteps()) {
+            String m = step.getMethod() == null ? "GET" : step.getMethod().toUpperCase();
+            if ("GET".equals(m) || "HEAD".equals(m) || "OPTIONS".equals(m)) continue;
+            // State-changing method on a non-telemetry step is
+            // enough to disqualify the candidate from being a
+            // pure public-resource lookup.
+            RequestClassification cls = step.getClassification();
+            if (cls != null) {
+                RequestIntent intent = cls.getIntent();
+                if (intent == RequestIntent.TELEMETRY_ANALYTICS
+                        || intent == RequestIntent.FEATURE_FLAG_CONFIG
+                        || intent == RequestIntent.BACKGROUND_POLLING
+                        || intent == RequestIntent.HEALTHCHECK
+                        || intent == RequestIntent.PREFLIGHT
+                        || intent == RequestIntent.STATIC_ASSET
+                        || intent == RequestIntent.THIRD_PARTY
+                        || intent == RequestIntent.CONTEXT_READ) {
+                    continue;
+                }
+            }
+            // Unknown / business intent on a state-changing method
+            // — not a public-resource lookup.
+            return false;
+        }
+
+        // (3) No private context anywhere in the chain.
         //     The detector inspects path, headers, response body,
         //     and classification intent of every step.
         if (privateContextDetector.chainHasPrivateContext(candidate.getSteps())) {
             return false;
         }
 
-        // (3) User-defined edge implies the user explicitly cares
+        // (4) User-defined edge implies the user explicitly cares
         //     about this chain — do not suppress.
         if (supportingEdges != null) {
             for (RequestEdge edge : supportingEdges) {
@@ -99,7 +133,7 @@ public class PublicResourceClassifier {
             }
         }
 
-        // (4) Critical workflow types are never "public resource"
+        // (5) Critical workflow types are never "public resource"
         //     even if the path contains a public keyword.
         if (isAlwaysAuthBound(candidate.getWorkflowType())) {
             return false;

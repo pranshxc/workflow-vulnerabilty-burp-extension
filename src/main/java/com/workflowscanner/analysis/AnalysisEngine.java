@@ -608,9 +608,16 @@ public class AnalysisEngine {
         if (c == null || c.getSteps() == null || c.getSteps().isEmpty()) {
             return false;
         }
+        // === P1-CORRECTNESS: include OPTIONS as a safe read ===
+        // OPTIONS is a CORS preflight or capability check; it does
+        // not modify server state. Some real workflows include
+        // incidental OPTIONS calls (e.g. a POST /checkout that
+        // triggers a CORS preflight for the response). Treating
+        // OPTIONS as read-only prevents the read-only filter from
+        // misclassifying the whole chain as state-changing.
         boolean readOnly = c.getSteps().stream().allMatch(n -> {
             String m = n.getMethod() == null ? "GET" : n.getMethod().toUpperCase();
-            return "GET".equals(m) || "HEAD".equals(m);
+            return "GET".equals(m) || "HEAD".equals(m) || "OPTIONS".equals(m);
         });
         if (!readOnly) return false;
         if (c.hasExplicitSupportingEdges()) return false;
