@@ -458,12 +458,29 @@ public class SettingsPanel extends JPanel {
                         setVocabStatus("LLM returned no vocabulary (endpoints empty or LLM error)");
                         return;
                     }
-                    // Merge into the visible text areas, preserving user edits.
-                    mergeIntoArea(vocabNounsArea, update.businessNouns);
-                    mergeIntoArea(vocabVerbsArea, update.actionVerbs);
-                    mergeIntoArea(vocabSensitiveArea, update.sensitiveFields);
-                    mergeIntoArea(vocabWorkflowArea, update.workflowTerms);
-                    setVocabStatus("LLM added " + update.size() + " terms");
+                    // Route via LLMVocabularyLearner.routeForUi so the
+                    // UI merge matches the runtime apply() routing.
+                    // businessNouns + actors → nouns area,
+                    // actionVerbs → verbs,
+                    // sensitiveFields → sensitive,
+                    // workflowTerms + stateTerms → workflow.
+                    java.util.Map<String, java.util.List<String>> routed =
+                            com.workflowscanner.analysis.LLMVocabularyLearner.routeForUi(update);
+                    int beforeN = lineCount(vocabNounsArea);
+                    int beforeV = lineCount(vocabVerbsArea);
+                    int beforeS = lineCount(vocabSensitiveArea);
+                    int beforeW = lineCount(vocabWorkflowArea);
+                    mergeIntoArea(vocabNounsArea, routed.get("nouns"));
+                    mergeIntoArea(vocabVerbsArea, routed.get("verbs"));
+                    mergeIntoArea(vocabSensitiveArea, routed.get("sensitive"));
+                    mergeIntoArea(vocabWorkflowArea, routed.get("workflow"));
+                    int addedN = lineCount(vocabNounsArea) - beforeN;
+                    int addedV = lineCount(vocabVerbsArea) - beforeV;
+                    int addedS = lineCount(vocabSensitiveArea) - beforeS;
+                    int addedW = lineCount(vocabWorkflowArea) - beforeW;
+                    setVocabStatus("LLM added " + (addedN + addedV + addedS + addedW)
+                            + " terms (n=" + addedN + " v=" + addedV
+                            + " s=" + addedS + " w=" + addedW + ")");
                 });
             } catch (Exception e) {
                 SwingUtilities.invokeLater(() ->
@@ -504,6 +521,15 @@ public class SettingsPanel extends JPanel {
                 .filter(s -> !s.isEmpty())
                 .distinct()
                 .collect(Collectors.toList());
+    }
+
+    /** Count non-empty lines in a text area. */
+    private static int lineCount(JTextArea area) {
+        if (area == null) return 0;
+        return (int) Arrays.stream(area.getText().split("\\n"))
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .count();
     }
 
     private JPanel createAnalysisSection() {

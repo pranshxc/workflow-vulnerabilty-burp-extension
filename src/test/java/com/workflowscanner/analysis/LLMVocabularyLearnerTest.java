@@ -124,4 +124,66 @@ class LLMVocabularyLearnerTest {
         assertTrue(u.isEmpty());
         assertEquals(0, u.size());
     }
+
+    /**
+     * Issue 1 fix: the UI merge path must include ALL six
+     * LLM categories. Previously, actors and state_terms were
+     * silently dropped. routeForUi() returns the four-area
+     * mapping used by the SettingsPanel.
+     */
+    @Test
+    void routeForUi_includesAllSixCategories() {
+        LLMVocabularyLearner.VocabularyUpdate u =
+                new LLMVocabularyLearner.VocabularyUpdate(
+                        List.of("reservation", "listing"),       // business_objects
+                        List.of("approve", "publish"),            // workflow_actions
+                        List.of("payout_account"),                // sensitive_fields
+                        List.of("wizard", "phase"),               // workflow_terms
+                        List.of("pending", "accepted"),           // state_terms
+                        List.of("guest", "host"));                // actors
+        java.util.Map<String, java.util.List<String>> routed =
+                LLMVocabularyLearner.routeForUi(u);
+        // nouns area: business_objects + actors
+        assertEquals(4, routed.get("nouns").size());
+        assertTrue(routed.get("nouns").contains("reservation"));
+        assertTrue(routed.get("nouns").contains("listing"));
+        assertTrue(routed.get("nouns").contains("guest"));
+        assertTrue(routed.get("nouns").contains("host"));
+        // verbs area: workflow_actions
+        assertEquals(2, routed.get("verbs").size());
+        assertTrue(routed.get("verbs").contains("approve"));
+        // sensitive area: sensitive_fields
+        assertEquals(1, routed.get("sensitive").size());
+        assertTrue(routed.get("sensitive").contains("payout_account"));
+        // workflow area: workflow_terms + state_terms
+        assertEquals(4, routed.get("workflow").size());
+        assertTrue(routed.get("workflow").contains("wizard"));
+        assertTrue(routed.get("workflow").contains("phase"));
+        assertTrue(routed.get("workflow").contains("pending"));
+        assertTrue(routed.get("workflow").contains("accepted"));
+    }
+
+    @Test
+    void routeForUi_nullUpdate_returnsEmptyLists() {
+        java.util.Map<String, java.util.List<String>> routed =
+                LLMVocabularyLearner.routeForUi(null);
+        assertEquals(4, routed.size());
+        for (java.util.List<String> v : routed.values()) {
+            assertNotNull(v);
+            assertTrue(v.isEmpty());
+        }
+    }
+
+    @Test
+    void routeForUi_emptyUpdate_stillReturnsFourKeys() {
+        LLMVocabularyLearner.VocabularyUpdate u =
+                LLMVocabularyLearner.parseResponse("{}");
+        java.util.Map<String, java.util.List<String>> routed =
+                LLMVocabularyLearner.routeForUi(u);
+        assertEquals(4, routed.size());
+        assertTrue(routed.containsKey("nouns"));
+        assertTrue(routed.containsKey("verbs"));
+        assertTrue(routed.containsKey("sensitive"));
+        assertTrue(routed.containsKey("workflow"));
+    }
 }

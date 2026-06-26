@@ -205,6 +205,44 @@ public class LLMVocabularyLearner {
         }
     }
 
+    /**
+     * UI routing map: returns which of the four user-editable
+     * vocabulary areas each LLM-inferred category should land in.
+     * Mirrors the {@link #apply} routing so the UI path and the
+     * runtime model stay in sync.
+     *
+     * <ul>
+     *   <li>{@code business_objects} + {@code actors} → "nouns"</li>
+     *   <li>{@code workflow_actions} → "verbs"</li>
+     *   <li>{@code sensitive_fields} → "sensitive"</li>
+     *   <li>{@code workflow_terms} + {@code state_terms} → "workflow"</li>
+     * </ul>
+     *
+     * <p>Returned lists are unmodifiable and may be empty.
+     */
+    public static java.util.Map<String, java.util.List<String>> routeForUi(
+            VocabularyUpdate update) {
+        java.util.Map<String, java.util.List<String>> out = new java.util.LinkedHashMap<>();
+        if (update == null) {
+            out.put("nouns", List.of());
+            out.put("verbs", List.of());
+            out.put("sensitive", List.of());
+            out.put("workflow", List.of());
+            return out;
+        }
+        java.util.List<String> nouns = new java.util.ArrayList<>(update.businessNouns);
+        nouns.addAll(update.actors);
+        java.util.List<String> workflow = new java.util.ArrayList<>(update.workflowTerms);
+        workflow.addAll(update.stateTerms);
+        out.put("nouns", java.util.Collections.unmodifiableList(nouns));
+        out.put("verbs", java.util.Collections.unmodifiableList(new java.util.ArrayList<>(
+                update.actionVerbs)));
+        out.put("sensitive", java.util.Collections.unmodifiableList(new java.util.ArrayList<>(
+                update.sensitiveFields)));
+        out.put("workflow", java.util.Collections.unmodifiableList(workflow));
+        return out;
+    }
+
     private static VocabularyUpdate emptyUpdate() {
         return new VocabularyUpdate(List.of(), List.of(), List.of(),
                 List.of(), List.of(), List.of());
