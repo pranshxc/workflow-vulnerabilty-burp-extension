@@ -189,6 +189,15 @@ public class GraphBuilder {
             // post-construction because the field is final; that
             // cap defaults to 50 and is a sane default. A future
             // patch can make the cap mutable for live tuning.
+            //
+            // The noise rules config IS swap-in after construction
+            // (setNoiseRulesConfig). This is how user customizations
+            // of infrastructureCookieNames, authSessionCookieNames,
+            // publicResourcePathPatterns, and workflowStateKeywords
+            // flow into the detector's edge-skip logic.
+            if (detector != null && config.getNoiseRules() != null) {
+                detector.setNoiseRulesConfig(config.getNoiseRules());
+            }
         }
         // Propagate config to graph for enriched stats when workflow detector is set
         if (workflowDetector != null && config != null) {

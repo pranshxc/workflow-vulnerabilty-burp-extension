@@ -31,11 +31,11 @@ import java.util.Set;
  * </ul>
  *
  * <p>This is the single, generic replacement for the
- * "blockchain / public-data" detection that was hard-coded for the
- * 1inch dataset. It must be called <b>before</b> the public-resource
- * classifier so that a request like
- * {@code /api/users/me/balance} is not misclassified as a public
- * lookup.
+ * "blockchain / public-data" detection that used to be hard-coded
+ * for a noisy public-data polling dataset. It must be called
+ * <b>before</b> the public-resource classifier so that a request
+ * like {@code /api/users/me/balance} is not misclassified as a
+ * public lookup.
  */
 public class PrivateContextDetector {
 

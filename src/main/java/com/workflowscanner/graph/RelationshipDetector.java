@@ -1,8 +1,10 @@
 package com.workflowscanner.graph;
 
 import com.workflowscanner.classification.EdgeStrength;
+import com.workflowscanner.classification.NoiseRulesConfig;
 import com.workflowscanner.classification.RequestClassification;
 import com.workflowscanner.classification.RequestIntent;
+import com.workflowscanner.classification.StaticNoiseRules;
 import com.workflowscanner.classification.ValueKind;
 import com.workflowscanner.data.RequestConverter;
 import com.workflowscanner.logging.ExtensionLogger;
@@ -94,44 +96,123 @@ public class RelationshipDetector {
     private final AtomicLong diagResponseValuesIndexed = new AtomicLong(0);
     private final AtomicLong diagNodesProcessed = new AtomicLong(0);
 
-    // Session cookie names that should never create workflow edges
-    private static final Set<String> SESSION_COOKIE_NAMES = Set.of(
-            "jsessionid", "phpsessid", "connect.sid", "session", "_auth",
-            "access_token", "refresh_token", "sid", "token", "auth_",
-            "awsalb", "lb", "sessionid", "__cfduid", "cfid", "cftoken",
-            "rememberme", "remember_me", "xsrf-token", "x-csrf-token");
+    // === Smart skip rules for edge creation ===
+    //
+    // The old design had a single hardcoded SESSION_COOKIE_NAMES
+    // set that included "token" / "access_token" / "refresh_token"
+    // and used a second hardcoded INFRA_COOKIE_NAMES set with
+    // overlap. That had two problems:
+    //
+    //   1. The infra check was hardcoded — user customizations
+    //      of NoiseRulesConfig.infrastructureCookieNames were
+    //      ignored on the edge path.
+    //   2. The auth-skip list was too broad — a cookie named
+    //      "payment_token" or "invite_token" (a real business
+    //      workflow token) was silently dropped from edge
+    //      creation, producing false negatives on fintech /
+    //      invite / password-reset / approval workflows.
+    //
+    // The new design separates the three concerns:
+    //
+    //   AUTH_SESSION_TOKEN   — exact-match auth/session cookie
+    //                          names. Skipped from edge creation.
+    //                          Universal (JSESSIONID, PHPSESSID,
+    //                          session, access_token, etc.).
+    //
+    //   WORKFLOW_STATE_TOKEN — substring-match keywords. If a
+    //                          cookie/param name contains one
+    //                          of these, it is treated as a
+    //                          business workflow token and the
+    //                          edge IS created. Configurable via
+    //                          NoiseRulesConfig.workflowStateKeywords.
+    //
+    //   INFRASTRUCTURE_COOKIE — anti-bot / tracking / load
+    //                          balancer cookies. Skipped from
+    //                          edge creation. Configurable via
+    //                          NoiseRulesConfig.infrastructureCookieNames.
+    //
+    // Decision precedence in detectResponseCorrelation:
+    //
+    //   1. infrastructure cookie? -> skip
+    //   2. exact auth-session name AND not workflow-state? -> skip
+    //   3. workflow-state keyword present? -> allow
+    //   4. default: allow (unknown names get edges; ValueKind
+    //      classifier still filters correlation-irrelevant values)
 
-    // === P0-QUALITY-GATE: cookie denylist ===
-    // Anti-bot, infrastructure, and tracking cookies are present
-    // on every request/response and produce "everything correlates
-    // to everything" noise. They are NEVER considered session
-    // cookies either, but they must be filtered before the
-    // RESPONSE_CORRELATION pass as well. The ValueKind
-    // classification also catches them, but this explicit denylist
-    // is the second line of defense.
-    private static final Set<String> INFRA_COOKIE_NAMES = Set.of(
-            // Anti-bot / bot management
-            "__cf_bm", "cf_clearance", "_cfuid", "_cflb",
-            "bm_sz", "ak_bmsc", "incap_ses_", "visid_incap",
-            "reese84", "reese_script",
-            // Load balancer / routing
-            "awsalb", "awsalbcors", "awselb",
-            // Tracking (exact prefixes handled separately in
-            // extractCookieName for the wildcard ones)
-            "rl_page_init_referrer", "rl_anonymous_id", "rl_user_id",
-            "amplitude_id", "ajs_anonymous_id", "ajs_user_id",
-            "mp_", "_pxvid", "_hjSession_", "_hjAbsoluteSessionInProgress",
-            "_gcl_au", "_gcl_aw", "_gcl_dc");
+    // === EXACT-MATCH auth/session cookie names. ===
+    // These should never create object-flow edges because they
+    // are identity / session cookies, not business workflow
+    // tokens. Substring match is NOT used here so that
+    // business tokens like "payment_token", "invite_token",
+    // "checkout_state" are NOT accidentally skipped.
+    private static final Set<String> EXACT_AUTH_COOKIE_NAMES = Set.of(
+            "jsessionid", "jsessionidsso",
+            "phpsessid",
+            "asp.net_sessionid", "aspsessionid",
+            "connect.sid", "connect.sid.sig",
+            "session", "sessionid", "session_id", "session-id",
+            "sid", "sess",
+            "auth", "authentication",
+            "access_token", "access-token", "accesstoken",
+            "refresh_token", "refresh-token", "refreshtoken",
+            "id_token", "id-token", "idtoken",
+            "bearer", "jwt",
+            // Common SaaS session cookies (kept here for the
+            // skip set; private-context detection in
+            // PrivateContextDetector still uses the broader
+            // NoiseRulesConfig.authSessionCookieNames list).
+            "logged_in", "loggedin", "user_session", "user-session",
+            "rememberme", "remember_me"
+    );
+
+    // === Config-driven noise rules ===
+    // The detector's infrastructure/tracking check now reads
+    // from a single NoiseRulesConfig so user customizations
+    // apply on the edge path. Backward-compatible constructors
+    // fall back to the default config (preserved for tests
+    // and for callers that do not have a config yet).
+    //
+    // The fields are not final so {@link #setNoiseRulesConfig}
+    // can swap the config after construction (called by
+    // GraphBuilder.start when the live extension config is
+    // available).
+    private volatile NoiseRulesConfig noiseConfig;
+    private volatile StaticNoiseRules noiseRules;
 
     public RelationshipDetector(RequestGraph graph, ExtensionLogger logger) {
-        this(graph, logger, 50);
+        this(graph, logger, 50, NoiseRulesConfig.withDefaults());
     }
 
     public RelationshipDetector(RequestGraph graph, ExtensionLogger logger,
                                 int indexMaxPerKey) {
+        this(graph, logger, indexMaxPerKey, NoiseRulesConfig.withDefaults());
+    }
+
+    public RelationshipDetector(RequestGraph graph, ExtensionLogger logger,
+                                NoiseRulesConfig config) {
+        this(graph, logger, 50, config);
+    }
+
+    public RelationshipDetector(RequestGraph graph, ExtensionLogger logger,
+                                int indexMaxPerKey, NoiseRulesConfig config) {
         this.graph = graph;
         this.logger = logger;
         this.indexMaxPerKey = Math.max(1, indexMaxPerKey);
+        NoiseRulesConfig effective = config != null ? config : NoiseRulesConfig.withDefaults();
+        this.noiseConfig = effective;
+        this.noiseRules = new StaticNoiseRules(effective);
+    }
+
+    /**
+     * Update the noise rules config after construction. Called
+     * by {@link GraphBuilder#start} so the detector picks up
+     * the live extension config (which has user customizations)
+     * rather than the defaults it was constructed with.
+     */
+    public void setNoiseRulesConfig(NoiseRulesConfig config) {
+        NoiseRulesConfig effective = config != null ? config : NoiseRulesConfig.withDefaults();
+        this.noiseConfig = effective;
+        this.noiseRules = new StaticNoiseRules(effective);
     }
 
     /**
@@ -421,10 +502,35 @@ public class RelationshipDetector {
             if (!entry.getKey().startsWith("cookie.")) continue;
             String cookieName = entry.getKey().substring(7).toLowerCase();
 
-            // Skip session cookies — they don't indicate workflow relationships
-            if (SESSION_COOKIE_NAMES.contains(cookieName)) continue;
-            // === P0-QUALITY-GATE: skip anti-bot / infra / tracking cookies ===
+            // === P1-CORRECTNESS: smart skip for edge creation ===
+            //
+            // Three rules, evaluated in order:
+            //
+            //   1. infrastructure/tracking cookie?  -> skip
+            //      (delegate to StaticNoiseRules which reads
+            //       NoiseRulesConfig.infrastructureCookieNames)
+            //
+            //   2. EXACT auth-session name AND not workflow-state?
+            //      -> skip. The exact-match list is curated to
+            //      only contain the canonical session-id names
+            //      (jsessionid, phpsessid, session, access_token,
+            //      etc.) so business workflow tokens like
+            //      "payment_token" or "invite_token" are NOT
+            //      skipped by accident.
+            //
+            //   3. workflow-state keyword present?  -> allow
+            //      (payment, checkout, invite, reset, flow, etc.)
+            //      This produces real workflow edges for
+            //      payment_token, invite_token, checkout_state,
+            //      reset_code, etc.
+            //
+            //   4. default: allow (unknown cookie names get
+            //      edges; the ValueKind classifier on the
+            //      caller side still filters low-signal values
+            //      like MONEY, STATUS, etc.)
             if (isInfrastructureOrTrackingCookie(cookieName)) continue;
+            if (EXACT_AUTH_COOKIE_NAMES.contains(cookieName)
+                    && !isWorkflowStateName(cookieName)) continue;
 
             diagNonSessionCookiesChecked.incrementAndGet();
             String cookieValue = entry.getValue().toString();
@@ -457,31 +563,52 @@ public class RelationshipDetector {
         return edges;
     }
 
-    // === P0-QUALITY-GATE: anti-bot / infra / tracking cookie prefix match ===
-    // Used as a second line of defense in addition to the ValueKind
-    // classifier. Returns true for any cookie name that is known
-    // infrastructure noise and should not produce a workflow edge.
-    private static boolean isInfrastructureOrTrackingCookie(String cookieName) {
-        if (cookieName == null) return false;
-        if (INFRA_COOKIE_NAMES.contains(cookieName)) return true;
-        // Common anti-bot / tracking prefixes
-        if (cookieName.startsWith("__cf_")) return true;
-        if (cookieName.startsWith("cf_")) return true;
-        if (cookieName.startsWith("_cflb")) return true;
-        if (cookieName.startsWith("_ga")) return true;     // _ga, _ga_*
-        if (cookieName.startsWith("_gid")) return true;
-        if (cookieName.startsWith("_gat")) return true;
-        if (cookieName.startsWith("_px")) return true;     // _pxvid, _px*
-        if (cookieName.startsWith("_hj")) return true;     // _hjSession_*
-        if (cookieName.startsWith("amplitude_")) return true;
-        if (cookieName.startsWith("ajs_")) return true;
-        if (cookieName.startsWith("rl_")) return true;     // Rollbar
-        if (cookieName.startsWith("mp_") || cookieName.startsWith("mp2_")) return true;
-        if (cookieName.startsWith("awsalb") || cookieName.startsWith("awselb")) return true;
-        if (cookieName.startsWith("bm_sz") || cookieName.startsWith("ak_bmsc")) return true;
-        if (cookieName.startsWith("incap_") || cookieName.startsWith("visid_incap")) return true;
-        if (cookieName.startsWith("nlbi_")) return true;
-        if (cookieName.startsWith("opt_") || cookieName.startsWith("optimizely")) return true;
+    // === P0-QUALITY-GATE: anti-bot / infra / tracking cookie check ===
+    //
+    // The old implementation kept its own hardcoded list of
+    // 24 prefix checks. That meant user customizations of
+    // NoiseRulesConfig.infrastructureCookieNames were ignored
+    // on the edge path.
+    //
+    // The new implementation delegates to StaticNoiseRules,
+    // which reads from the same NoiseRulesConfig the rest
+    // of the pipeline uses. Backward-compatible static
+    // accessor (isInfrastructureOrTrackingCookieStatic) is
+    // preserved for unit tests that do not have a config.
+    private boolean isInfrastructureOrTrackingCookie(String cookieName) {
+        return noiseRules != null && noiseRules.isInfrastructureOrTrackingCookie(cookieName);
+    }
+
+    /** Backward-compatible static accessor using default config. */
+    public static boolean isInfrastructureOrTrackingCookieStatic(String cookieName) {
+        return new StaticNoiseRules(NoiseRulesConfig.withDefaults())
+                .isInfrastructureOrTrackingCookie(cookieName);
+    }
+
+    /**
+     * Substring-match against the workflow-state keyword list
+     * (configurable via NoiseRulesConfig.workflowStateKeywords).
+     *
+     * <p>If a cookie/parameter name contains one of the
+     * workflow-state keywords (e.g. "payment", "checkout",
+     * "invite", "reset", "flow", "wizard", "state",
+     * "transaction", "order", "cart"), the name is treated
+     * as a business workflow token and the
+     * RESPONSE_CORRELATION edge IS created.
+     *
+     * <p>Used as the override that prevents broad
+     * auth-cookie skip lists from dropping real workflow
+     * tokens (payment_token, invite_token, checkout_state,
+     * reset_code, flow_step, wizard_state, etc.).
+     */
+    private boolean isWorkflowStateName(String name) {
+        if (name == null || noiseConfig == null) return false;
+        for (String keyword : noiseConfig.getWorkflowStateKeywords()) {
+            if (keyword == null) continue;
+            if (name.contains(keyword.toLowerCase(java.util.Locale.ROOT))) {
+                return true;
+            }
+        }
         return false;
     }
 

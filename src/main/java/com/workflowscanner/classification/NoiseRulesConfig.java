@@ -325,6 +325,46 @@ public class NoiseRulesConfig {
     ));
 
     // ---------------------------------------------------------------
+    // Workflow-state token keywords.
+    //
+    // Substring match. If a cookie or parameter name contains
+    // one of these substrings (e.g. "payment_token",
+    // "invite_token", "checkout_state", "reset_code",
+    // "flow_step", "wizard_state", "transaction_id",
+    // "approval_token", "order_state", "cart_token"), the
+    // request is treated as carrying a business workflow
+    // token, NOT as an auth/session cookie, and the
+    // RelationshipDetector creates PARAM_REUSE /
+    // RESPONSE_CORRELATION edges for it.
+    //
+    // The list works in tandem with the exact-match
+    // auth-session skip set in RelationshipDetector:
+    //
+    //   1. If the name is an infrastructure/tracking cookie
+    //      (in infrastructureCookieNames), skip the edge.
+    //   2. If the name EXACTLY matches an auth-session name
+    //      (access_token, refresh_token, id_token, jwt,
+    //      session, sessionid, jsessionid, phpsessid,
+    //      connect.sid, asp.net_sessionid), skip the edge.
+    //   3. If the name contains a workflow-state keyword
+    //      from this list, allow the edge.
+    //   4. Otherwise, skip (fail-safe: unknown = auth).
+    //
+    // This preserves real workflow-token edges (payment,
+    // checkout, invite, reset, approval, etc.) while still
+    // suppressing auth/infra cookies. Universal — applies
+    // to any web app that uses standard workflow tokens.
+    // ---------------------------------------------------------------
+    private List<String> workflowStateKeywords = Collections.unmodifiableList(Arrays.asList(
+            "payment", "checkout", "invite", "invitation",
+            "reset", "approval", "approve",
+            "flow", "wizard", "state",
+            "transaction", "order", "cart",
+            "register", "signup", "verification",
+            "receipt", "ticket", "case", "claim"
+    ));
+
+    // ---------------------------------------------------------------
     // Getters / setters. Lists are exposed as mutable copies so
     // tests and user overrides can append without altering the
     // shared defaults. Use {@link #withDefaults()} to get a
@@ -436,6 +476,15 @@ public class NoiseRulesConfig {
 
     public void setHealthCheckPaths(List<String> v) {
         this.healthCheckPaths = v != null ? Collections.unmodifiableList(new ArrayList<>(v))
+                : Collections.emptyList();
+    }
+
+    public List<String> getWorkflowStateKeywords() {
+        return new ArrayList<>(workflowStateKeywords);
+    }
+
+    public void setWorkflowStateKeywords(List<String> v) {
+        this.workflowStateKeywords = v != null ? Collections.unmodifiableList(new ArrayList<>(v))
                 : Collections.emptyList();
     }
 

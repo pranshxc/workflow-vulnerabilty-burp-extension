@@ -84,9 +84,10 @@ public class ExtensionConfig {
     // failed-validation findings as informational Burp issues.
     private boolean reportFailedValidationHypotheses = false;
     // Default false: do not analyze read-only session-only
-    // candidates (the exact pattern that produced the noisy 1inch
-    // dataset's /price /balance /wallet findings). Set true to
-    // spend LLM calls on them anyway.
+    // candidates (the exact pattern that produced noisy
+    // public-data /price /balance /wallet findings on a
+    // previous audit dataset). Set true to spend LLM calls
+    // on them anyway.
     private boolean analyzeReadOnlyCandidates = false;
 
     // --- Universal Noise Rules (added in P0 quality-gate universal rework) ---

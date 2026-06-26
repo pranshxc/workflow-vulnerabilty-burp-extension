@@ -66,6 +66,12 @@ public enum ReportabilityDecision {
     SUPPRESS_VALIDATION_FAILED(false, "All validation tests failed / not confirmed"),
     /** Read-only GET sequence on a session-only candidate with no explicit edges. */
     SUPPRESS_READ_ONLY_SESSION_ONLY(false, "Read-only session-only candidate, no validation, no explicit edges"),
+    /** Unknown authenticated state-changing flow: structurally interesting but
+     *  the user has not opted in to reportUnconfirmedFindings. The candidate
+     *  was analyzed (LLM saw it) and is visible in the Graph tab; it just is
+     *  not surfaced as a Burp issue under the default conservative config.
+     *  Flip reportUnconfirmedFindings=true to promote to REPORT_NEEDS_REVIEW. */
+    SUPPRESS_STRUCTURAL_INTEREST(false, "Unknown authenticated state-changing flow; structurally interesting but unconfirmed"),
     /** General low-signal fallback (catches session-only, no explicit edges, no state-change, no critical type). */
     SUPPRESS_LOW_SIGNAL(false, "Low-signal: no validation, no explicit edges, no state-changing steps, unknown workflow type");
 

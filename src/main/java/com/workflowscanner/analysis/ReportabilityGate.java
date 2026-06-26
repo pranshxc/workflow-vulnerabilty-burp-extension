@@ -40,10 +40,24 @@ import java.util.Set;
  * <p><b>Decision precedence (highest first):</b>
  * <ol>
  *   <li>REPORT_CONFIRMED — any strict (CONFIRMED) validation proof</li>
+ *   <li>SUPPRESS_INFRASTRUCTURE_POLLING — infra-only chain (≥80%
+ *       telemetry/feature-flag/polling steps, no state-changing
+ *       business step, no private context)</li>
  *   <li>SUPPRESS_PUBLIC_RESOURCE — public-resource pattern + no
  *       auth-bound ownership proof</li>
  *   <li>SUPPRESS_VALIDATION_FAILED — all tests failed/empty AND
  *       user has not opted in to failed-validation hypotheses</li>
+ *   <li>REPORT_NEEDS_REVIEW or SUPPRESS_STRUCTURAL_INTEREST —
+ *       Phase-1 escape hatch: UNKNOWN_BUSINESS_FLOW + auth + state-
+ *       changing + no validation ran. Default conservative:
+ *       SUPPRESS_STRUCTURAL_INTEREST (candidate is analyzed and
+ *       visible, not surfaced as a Burp issue). With
+ *       reportUnconfirmedFindings=true: REPORT_NEEDS_REVIEW</li>
+ *   <li>SUPPRESS_LLM_ONLY — no validation ran, no Phase-1 escape,
+ *       user has not opted in to LLM-only findings</li>
+ *   <li>SUPPRESS_UNCONFIRMED — has probable validation but no
+ *       strict confirmation and user has not opted in to
+ *       unconfirmed reports</li>
  *   <li>SUPPRESS_READ_ONLY_SESSION_ONLY — session-only candidate,
  *       all steps are GET/HEAD, no explicit edges, no probable
  *       validation, and user has not opted in to read-only
@@ -278,6 +292,48 @@ public class ReportabilityGate {
             // User opted in: continue to the next check.
         }
 
+        // (4.5) === Phase-1 / "unknown authenticated state-changing
+        //     flows are analyzable" ===
+        //     If we got this far, the candidate is UNKNOWN_BUSINESS_FLOW
+        //     (no keyword match, not a recognized workflow type) AND
+        //     it is authenticated AND it has a state-changing step AND
+        //     it is not infrastructure-only AND no validation ran at
+        //     all. The candidate is structurally interesting — the
+        //     conservative default is to suppress with
+        //     SUPPRESS_STRUCTURAL_INTEREST (analyze-eligible but not
+        //     surfaced); users can opt in via reportUnconfirmedFindings.
+        //
+        //     Scope rationale:
+        //     - strict confirmation is caught at (1) above
+        //     - probable validation is caught at (6)/(8) — preserve
+        //       the existing SUPPRESS_UNCONFIRMED / REPORT_NEEDS_REVIEW
+        //       path for known-probable findings
+        //     - validationAllFailed is caught at (4) above — preserve
+        //       the existing SUPPRESS_VALIDATION_FAILED
+        //     - validationSkipped is the new slice: an LLM saw the
+        //       candidate but the user has not run any validation.
+        //       This is where the structurally-interesting escape
+        //       hatch lives.
+        if (candidate.getWorkflowType() == WorkflowType.UNKNOWN_BUSINESS_FLOW
+                && hasStateChanging
+                && chainHasPrivateContext
+                && !isInfrastructureOnly
+                && validationSkipped) {
+            if (!config.isReportUnconfirmedFindings()) {
+                return suppress(verdict, candidate,
+                        ReportabilityDecision.SUPPRESS_STRUCTURAL_INTEREST,
+                        customReason + " (unknown auth-bound state-changing flow, unconfirmed; "
+                                + "set reportUnconfirmedFindings=true to surface)");
+            }
+            if (isVulnerable || isSuspicious) {
+                return report(verdict, candidate, ReportabilityDecision.REPORT_NEEDS_REVIEW,
+                        customReason + " (unknown auth-bound state-changing flow, opt-in)");
+            }
+            return suppress(verdict, candidate,
+                    ReportabilityDecision.SUPPRESS_STRUCTURAL_INTEREST,
+                    customReason + " (unknown auth-bound state-changing flow, opt-in but verdict=SAFE)");
+        }
+
         // (5) LLM-only finding: no validation ran at all. Without
         //     the reportLLMOnlyFindings opt-in, suppress.
         if (validationSkipped) {
@@ -308,8 +364,8 @@ public class ReportabilityGate {
         }
 
         // (7) Read-only session-only candidate with no validation
-        //     support. The exact pattern from the noisy 1inch
-        //     dataset: GET /price, GET /balance, GET /price.
+        //     support. The exact pattern from a noisy public-data
+        //     polling dataset: GET /price, GET /balance, GET /price.
         if (readOnly && sessionOnly && !hasProbableValidation && !userDefined) {
             if (!config.isAnalyzeReadOnlyCandidates()) {
                 return suppress(verdict, candidate,

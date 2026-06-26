@@ -29,11 +29,11 @@ import java.util.Set;
  *
  * <p><b>P0-QUALITY-GATE:</b> {@link #TIME_WINDOW} is now also
  * filtered on graph load (see {@code GraphBuilder.loadFromDirectory})
- * and on live edge creation. The audit found 18,303 TIME_WINDOW
- * edges in a real 1inch dataset, dominating 72% of all edges
- * and contributing zero workflow signal. They are kept in the
- * enum for backward compatibility with old export files but
- * are never created or counted.
+ * and on live edge creation. A previous audit found 18,303
+ * TIME_WINDOW edges in a large backfilled dataset, dominating
+ * 72% of all edges and contributing zero workflow signal.
+ * They are kept in the enum for backward compatibility with
+ * old export files but are never created or counted.
  */
 public enum EdgeType {
     REDIRECT,              // HTTP 3xx redirect chain

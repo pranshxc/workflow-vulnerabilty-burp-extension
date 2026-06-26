@@ -204,6 +204,26 @@ public class RequestClassifier {
         // Priority 13: Fallback for unknown requests
         EndpointKey key = endpointNormalizer.normalize(request);
         if (businessScore > 0 || hasBody || isStateChanging) {
+            // === Phase-1 / "if you implement only one thing" ===
+            // Unknown authenticated state-changing flows are structurally
+            // interesting even when no keyword matches. They get a
+            // meaningful business score (4.0) so they survive the
+            // analysis-threshold filter and the LLM gets a chance to
+            // evaluate them. The gate still suppresses unconfirmed
+            // findings by default; the user can opt in via
+            // reportUnconfirmedFindings=true.
+            //
+            // Without this, an authenticated POST /api/mandates/123/action
+            // or PATCH /api/x29/process with no business keyword would
+            // be classified as UNKNOWN at score=0.5 and die in the
+            // threshold filter — a worst-case false negative.
+            boolean authBoundUnknown = isStateChanging
+                    && privateContextDetector.hasPrivateContext(request);
+            if (authBoundUnknown) {
+                return new RequestClassification(
+                        RequestIntent.UNKNOWN, 4.0, 0, true, false,
+                        "Unknown authenticated state-changing flow (structurally interesting)", key);
+            }
             return RequestClassification.unknown("Has business signals but low confidence", key);
         }
 

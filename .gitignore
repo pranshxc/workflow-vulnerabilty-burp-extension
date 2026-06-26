@@ -29,3 +29,18 @@ Thumbs.db
 
 # Generated
 /src/main/resources/version.properties
+
+# Local extension working data
+# (audit exports, backfilled proxy history, H2 MVStore,
+#  hot-graph JSON exports — none of which belong in source control)
+Burp_Workflow_Graph/
+graph-nodes.json
+graph-nodes.json.*
+graph-edges.json
+reported_issues.xml
+reported_issue.xml
+*.mv.db
+*.trace.db
+burp-graph-export/
+backfill-cache/
+

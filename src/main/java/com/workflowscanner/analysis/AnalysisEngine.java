@@ -191,10 +191,10 @@ public class AnalysisEngine {
             // Default behavior (reportability rework): skip read-only
             // session-only candidates that have no explicit edges
             // and no critical workflow type. The exact pattern from
-            // the noisy 1inch dataset (GET /price, GET /balance,
-            // GET /wallet). These still appear in the Graph tab
-            // (the workflow detector emits them) but do not consume
-            // an LLM call. Users can opt in via
+            // a noisy public-data polling dataset (GET /price,
+            // GET /balance, GET /wallet). These still appear in the
+            // Graph tab (the workflow detector emits them) but do
+            // not consume an LLM call. Users can opt in via
             // ExtensionConfig.setAnalyzeReadOnlyCandidates(true).
             double analysisThreshold = config.getWorkflowScoreThreshold();
             boolean analyzeReadOnly = config.isAnalyzeReadOnlyCandidates();
