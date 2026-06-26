@@ -385,6 +385,27 @@ public class NoiseRulesConfig {
     private List<String> customWorkflowTerms = Collections.emptyList();
 
     // ---------------------------------------------------------------
+    // Realism-upgrade-2 / Issue 2: separate LLM-inferred storage
+    //
+    // The LLM vocabulary learner writes to these lists (not the
+    // custom* lists) so that LLM-inferred terms keep their
+    // LLM_INFERRED source (default weight 0.5) even after the
+    // user saves settings. The custom* lists remain USER-source
+    // (weight 1.0) and are reserved for terms the user has
+    // explicitly chosen.
+    //
+    // Promotion: the SettingsPanel exposes these lists in a
+    // read-only section with a "Promote to user" button per
+    // area. Until the user promotes, LLM-inferred terms are
+    // applied at runtime with the lower LLM weight so a
+    // hallucination cannot dominate scoring.
+    // ---------------------------------------------------------------
+    private List<String> llmInferredBusinessNouns = Collections.emptyList();
+    private List<String> llmInferredActionVerbs = Collections.emptyList();
+    private List<String> llmInferredSensitiveFields = Collections.emptyList();
+    private List<String> llmInferredWorkflowTerms = Collections.emptyList();
+
+    // ---------------------------------------------------------------
     // Getters / setters. Lists are exposed as mutable copies so
     // tests and user overrides can append without altering the
     // shared defaults. Use {@link #withDefaults()} to get a
@@ -541,6 +562,46 @@ public class NoiseRulesConfig {
 
     public void setCustomWorkflowTerms(List<String> v) {
         this.customWorkflowTerms = v != null ? Collections.unmodifiableList(new ArrayList<>(v))
+                : Collections.emptyList();
+    }
+
+    public List<String> getLlmInferredBusinessNouns() {
+        return new ArrayList<>(llmInferredBusinessNouns);
+    }
+
+    public void setLlmInferredBusinessNouns(List<String> v) {
+        this.llmInferredBusinessNouns = v != null
+                ? Collections.unmodifiableList(new ArrayList<>(v))
+                : Collections.emptyList();
+    }
+
+    public List<String> getLlmInferredActionVerbs() {
+        return new ArrayList<>(llmInferredActionVerbs);
+    }
+
+    public void setLlmInferredActionVerbs(List<String> v) {
+        this.llmInferredActionVerbs = v != null
+                ? Collections.unmodifiableList(new ArrayList<>(v))
+                : Collections.emptyList();
+    }
+
+    public List<String> getLlmInferredSensitiveFields() {
+        return new ArrayList<>(llmInferredSensitiveFields);
+    }
+
+    public void setLlmInferredSensitiveFields(List<String> v) {
+        this.llmInferredSensitiveFields = v != null
+                ? Collections.unmodifiableList(new ArrayList<>(v))
+                : Collections.emptyList();
+    }
+
+    public List<String> getLlmInferredWorkflowTerms() {
+        return new ArrayList<>(llmInferredWorkflowTerms);
+    }
+
+    public void setLlmInferredWorkflowTerms(List<String> v) {
+        this.llmInferredWorkflowTerms = v != null
+                ? Collections.unmodifiableList(new ArrayList<>(v))
                 : Collections.emptyList();
     }
 

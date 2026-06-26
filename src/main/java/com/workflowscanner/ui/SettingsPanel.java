@@ -64,6 +64,16 @@ public class SettingsPanel extends JPanel {
     private JTextArea vocabWorkflowArea;
     private JLabel vocabStatusLabel;
 
+    // Issue 2: separate read-only areas for LLM-inferred terms.
+    // Edits in the user area are saved as USER-source terms; the
+    // LLM area keeps LLM_INFERRED source until the user
+    // explicitly promotes terms.
+    private JTextArea llmNounsArea;
+    private JTextArea llmVerbsArea;
+    private JTextArea llmSensitiveArea;
+    private JTextArea llmWorkflowArea;
+    private JLabel llmVocabStatusLabel;
+
     // Analysis fields
     private JComboBox<Integer> concurrencyCombo;
     private JCheckBox autoAnalyzeCheck;
@@ -113,6 +123,8 @@ public class SettingsPanel extends JPanel {
         content.add(createScopeSection());
         content.add(Box.createVerticalStrut(10));
         content.add(createVocabularySection());
+        content.add(Box.createVerticalStrut(10));
+        content.add(createLlmVocabularySection());
         content.add(Box.createVerticalStrut(10));
         content.add(createAnalysisSection());
         content.add(Box.createVerticalStrut(15));
@@ -458,29 +470,26 @@ public class SettingsPanel extends JPanel {
                         setVocabStatus("LLM returned no vocabulary (endpoints empty or LLM error)");
                         return;
                     }
-                    // Route via LLMVocabularyLearner.routeForUi so the
-                    // UI merge matches the runtime apply() routing.
-                    // businessNouns + actors → nouns area,
-                    // actionVerbs → verbs,
-                    // sensitiveFields → sensitive,
-                    // workflowTerms + stateTerms → workflow.
+                    // === Issue 2 fix: write to LLM-Inferred areas only ===
+                    // The user-editable areas above are reserved for
+                    // user-approved (USER-source) terms. LLM output
+                    // goes to the read-only LLM-Inferred areas, which
+                    // are saved as llmInferred* fields and loaded with
+                    // source=LLM_INFERRED (weight 0.5). The user can
+                    // promote terms to the user area explicitly via
+                    // the "Promote All" / "Promote New" buttons.
                     java.util.Map<String, java.util.List<String>> routed =
                             com.workflowscanner.analysis.LLMVocabularyLearner.routeForUi(update);
-                    int beforeN = lineCount(vocabNounsArea);
-                    int beforeV = lineCount(vocabVerbsArea);
-                    int beforeS = lineCount(vocabSensitiveArea);
-                    int beforeW = lineCount(vocabWorkflowArea);
-                    mergeIntoArea(vocabNounsArea, routed.get("nouns"));
-                    mergeIntoArea(vocabVerbsArea, routed.get("verbs"));
-                    mergeIntoArea(vocabSensitiveArea, routed.get("sensitive"));
-                    mergeIntoArea(vocabWorkflowArea, routed.get("workflow"));
-                    int addedN = lineCount(vocabNounsArea) - beforeN;
-                    int addedV = lineCount(vocabVerbsArea) - beforeV;
-                    int addedS = lineCount(vocabSensitiveArea) - beforeS;
-                    int addedW = lineCount(vocabWorkflowArea) - beforeW;
-                    setVocabStatus("LLM added " + (addedN + addedV + addedS + addedW)
-                            + " terms (n=" + addedN + " v=" + addedV
-                            + " s=" + addedS + " w=" + addedW + ")");
+                    int addedN = appendToLlmArea(llmNounsArea, routed.get("nouns"));
+                    int addedV = appendToLlmArea(llmVerbsArea, routed.get("verbs"));
+                    int addedS = appendToLlmArea(llmSensitiveArea, routed.get("sensitive"));
+                    int addedW = appendToLlmArea(llmWorkflowArea, routed.get("workflow"));
+                    int total = addedN + addedV + addedS + addedW;
+                    setVocabStatus("LLM added " + total
+                            + " terms to LLM-Inferred area (n=" + addedN + " v=" + addedV
+                            + " s=" + addedS + " w=" + addedW
+                            + "). Use 'Promote' to make them user-vocabulary.");
+                    llmVocabStatusLabel.setText(" " + total + " new terms; review and promote");
                 });
             } catch (Exception e) {
                 SwingUtilities.invokeLater(() ->
@@ -530,6 +539,149 @@ public class SettingsPanel extends JPanel {
                 .map(String::trim)
                 .filter(s -> !s.isEmpty())
                 .count();
+    }
+
+    /**
+     * Append terms to a read-only LLM-inferred area, deduping
+     * case-insensitively. Returns the number of new terms added.
+     */
+    private static int appendToLlmArea(JTextArea area, java.util.List<String> terms) {
+        if (area == null || terms == null || terms.isEmpty()) return 0;
+        java.util.Set<String> existing = new java.util.HashSet<>();
+        for (String line : area.getText().split("\\n")) {
+            String t = line.trim();
+            if (!t.isEmpty()) existing.add(t.toLowerCase());
+        }
+        StringBuilder sb = new StringBuilder(area.getText());
+        int added = 0;
+        for (String term : terms) {
+            if (term == null || term.isBlank()) continue;
+            String t = term.trim();
+            if (existing.add(t.toLowerCase())) {
+                if (sb.length() > 0 && sb.charAt(sb.length() - 1) != '\n') {
+                    sb.append("\n");
+                }
+                sb.append(t);
+                added++;
+            }
+        }
+        if (added > 0) area.setText(sb.toString());
+        return added;
+    }
+
+    /**
+     * Issue 2: separate "LLM-Inferred Vocabulary" section. The
+     * four text areas are read-only — the user can promote the
+     * whole list (or selected lines) to the user-editable
+     * areas above. Until promoted, these terms are applied at
+     * runtime with source=LLM_INFERRED (default weight 0.5),
+     * so a hallucination cannot dominate scoring.
+     */
+    private JPanel createLlmVocabularySection() {
+        JPanel panel = new JPanel(new BorderLayout(5, 5));
+        panel.setBorder(BorderFactory.createTitledBorder(
+                BorderFactory.createEtchedBorder(), "LLM-Inferred Vocabulary",
+                TitledBorder.LEFT, TitledBorder.TOP));
+
+        JPanel grid = new JPanel(new GridLayout(2, 2, 5, 5));
+        grid.add(buildLlmVocabArea("Business nouns (LLM-inferred)",
+                area -> llmNounsArea = area));
+        grid.add(buildLlmVocabArea("Action verbs (LLM-inferred)",
+                area -> llmVerbsArea = area));
+        grid.add(buildLlmVocabArea("Sensitive fields (LLM-inferred)",
+                area -> llmSensitiveArea = area));
+        grid.add(buildLlmVocabArea("Other workflow terms (LLM-inferred)",
+                area -> llmWorkflowArea = area));
+        panel.add(grid, BorderLayout.CENTER);
+
+        JPanel btnPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 3));
+        JButton promoteAllBtn = new JButton("Promote All to User");
+        promoteAllBtn.setToolTipText("Copy all LLM-inferred terms into the user-editable "
+                + "areas above (now stored as USER-source terms)");
+        promoteAllBtn.addActionListener(e -> promoteLlmToUser(true));
+        btnPanel.add(promoteAllBtn);
+
+        JButton promoteNewBtn = new JButton("Promote New Only");
+        promoteNewBtn.setToolTipText("Copy LLM-inferred terms not already present in the "
+                + "user-editable areas");
+        promoteNewBtn.addActionListener(e -> promoteLlmToUser(false));
+        btnPanel.add(promoteNewBtn);
+
+        JButton clearLlmBtn = new JButton("Clear LLM-Inferred");
+        clearLlmBtn.setToolTipText("Discard all LLM-inferred terms (does not affect user terms)");
+        clearLlmBtn.addActionListener(e -> {
+            llmNounsArea.setText("");
+            llmVerbsArea.setText("");
+            llmSensitiveArea.setText("");
+            llmWorkflowArea.setText("");
+        });
+        btnPanel.add(clearLlmBtn);
+
+        llmVocabStatusLabel = new JLabel(" ");
+        btnPanel.add(llmVocabStatusLabel);
+        panel.add(btnPanel, BorderLayout.SOUTH);
+
+        panel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 280));
+        return panel;
+    }
+
+    private JPanel buildLlmVocabArea(String label,
+                                      java.util.function.Consumer<JTextArea> setter) {
+        JPanel p = new JPanel(new BorderLayout(2, 2));
+        JLabel l = new JLabel(label);
+        l.setFont(l.getFont().deriveFont(Font.PLAIN, 11f));
+        p.add(l, BorderLayout.NORTH);
+        JTextArea area = new JTextArea(4, 30);
+        area.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 11));
+        area.setEditable(false);
+        area.setBackground(new Color(248, 248, 240));
+        area.setLineWrap(true);
+        area.setWrapStyleWord(true);
+        area.setToolTipText("LLM-inferred terms. Editable above after promotion. "
+                + "Stored with source=LLM_INFERRED (weight 0.5).");
+        JScrollPane sp = new JScrollPane(area);
+        sp.setPreferredSize(new Dimension(300, 70));
+        p.add(sp, BorderLayout.CENTER);
+        setter.accept(area);
+        return p;
+    }
+
+    /**
+     * Copy LLM-inferred terms into the user-editable areas.
+     * If {@code all} is true, copy every term. If false, only
+     * copy terms that are not already present (case-insensitive).
+     */
+    private void promoteLlmToUser(boolean all) {
+        int before = lineCount(vocabNounsArea) + lineCount(vocabVerbsArea)
+                + lineCount(vocabSensitiveArea) + lineCount(vocabWorkflowArea);
+        promoteOneArea(llmNounsArea, vocabNounsArea, all);
+        promoteOneArea(llmVerbsArea, vocabVerbsArea, all);
+        promoteOneArea(llmSensitiveArea, vocabSensitiveArea, all);
+        promoteOneArea(llmWorkflowArea, vocabWorkflowArea, all);
+        int after = lineCount(vocabNounsArea) + lineCount(vocabVerbsArea)
+                + lineCount(vocabSensitiveArea) + lineCount(vocabWorkflowArea);
+        llmVocabStatusLabel.setText(" Promoted " + (after - before) + " terms to user vocabulary");
+    }
+
+    private void promoteOneArea(JTextArea from, JTextArea to, boolean all) {
+        java.util.Set<String> existing = new java.util.HashSet<>();
+        for (String line : to.getText().split("\\n")) {
+            String t = line.trim();
+            if (!t.isEmpty()) existing.add(t.toLowerCase());
+        }
+        StringBuilder sb = new StringBuilder(to.getText());
+        for (String line : from.getText().split("\\n")) {
+            String t = line.trim();
+            if (t.isEmpty()) continue;
+            if (all || !existing.contains(t.toLowerCase())) {
+                if (sb.length() > 0 && sb.charAt(sb.length() - 1) != '\n') {
+                    sb.append("\n");
+                }
+                sb.append(t);
+                existing.add(t.toLowerCase());
+            }
+        }
+        to.setText(sb.toString());
     }
 
     private JPanel createAnalysisSection() {
@@ -634,6 +786,11 @@ public class SettingsPanel extends JPanel {
             vocabVerbsArea.setText(String.join("\n", nrc.getCustomActionVerbs()));
             vocabSensitiveArea.setText(String.join("\n", nrc.getCustomSensitiveFields()));
             vocabWorkflowArea.setText(String.join("\n", nrc.getCustomWorkflowTerms()));
+            // Issue 2: separate LLM-inferred areas
+            llmNounsArea.setText(String.join("\n", nrc.getLlmInferredBusinessNouns()));
+            llmVerbsArea.setText(String.join("\n", nrc.getLlmInferredActionVerbs()));
+            llmSensitiveArea.setText(String.join("\n", nrc.getLlmInferredSensitiveFields()));
+            llmWorkflowArea.setText(String.join("\n", nrc.getLlmInferredWorkflowTerms()));
         }
 
         concurrencyCombo.setSelectedItem(config.getAnalysisConcurrency());
@@ -669,6 +826,12 @@ public class SettingsPanel extends JPanel {
             nrc.setCustomActionVerbs(parseVocabArea(vocabVerbsArea));
             nrc.setCustomSensitiveFields(parseVocabArea(vocabSensitiveArea));
             nrc.setCustomWorkflowTerms(parseVocabArea(vocabWorkflowArea));
+            // Issue 2: persist LLM-inferred lists separately so they
+            // keep LLM_INFERRED source (weight 0.5) at runtime
+            nrc.setLlmInferredBusinessNouns(parseVocabArea(llmNounsArea));
+            nrc.setLlmInferredActionVerbs(parseVocabArea(llmVerbsArea));
+            nrc.setLlmInferredSensitiveFields(parseVocabArea(llmSensitiveArea));
+            nrc.setLlmInferredWorkflowTerms(parseVocabArea(llmWorkflowArea));
         }
 
         config.setAnalysisConcurrency((Integer) concurrencyCombo.getSelectedItem());

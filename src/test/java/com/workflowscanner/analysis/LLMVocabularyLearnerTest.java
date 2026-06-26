@@ -186,4 +186,68 @@ class LLMVocabularyLearnerTest {
         assertTrue(routed.containsKey("sensitive"));
         assertTrue(routed.containsKey("workflow"));
     }
+
+    // ================================================================
+    // Issue 4: frequency-based endpoint selection
+    // ================================================================
+
+    @Test
+    void endpointAccumulator_countsOccurrencesPerTemplate() {
+        LLMVocabularyLearner.EndpointAccumulator e =
+                new LLMVocabularyLearner.EndpointAccumulator("POST", "/api/booking/{id}/cancel");
+        assertEquals(0, e.count);
+        e.count++;
+        e.count++;
+        e.count++;
+        assertEquals(3, e.count);
+    }
+
+    @Test
+    void buildRowsFromAccumulator_sortsByCountDesc() {
+        java.util.Map<String, LLMVocabularyLearner.EndpointAccumulator> acc =
+                new java.util.HashMap<>();
+        LLMVocabularyLearner.EndpointAccumulator rare =
+                new LLMVocabularyLearner.EndpointAccumulator("GET", "/api/health");
+        rare.count = 1;
+        acc.put("GET /api/health", rare);
+        LLMVocabularyLearner.EndpointAccumulator common =
+                new LLMVocabularyLearner.EndpointAccumulator("POST", "/api/reservations/{id}/cancel");
+        common.count = 50;
+        acc.put("POST /api/reservations/{id}/cancel", common);
+        LLMVocabularyLearner.EndpointAccumulator medium =
+                new LLMVocabularyLearner.EndpointAccumulator("POST", "/api/mandates/{id}/sign");
+        medium.count = 10;
+        acc.put("POST /api/mandates/{id}/sign", medium);
+
+        java.util.List<LLMVocabularyLearner.EndpointRow> rows =
+                LLMVocabularyLearner.buildRowsFromAccumulatorPublic(acc, 3);
+        assertEquals(3, rows.size());
+        assertEquals("/api/reservations/{id}/cancel", rows.get(0).template);
+        assertEquals("/api/mandates/{id}/sign", rows.get(1).template);
+        assertEquals("/api/health", rows.get(2).template);
+    }
+
+    @Test
+    void buildRowsFromAccumulator_respectsMaxEndpoints() {
+        java.util.Map<String, LLMVocabularyLearner.EndpointAccumulator> acc =
+                new java.util.HashMap<>();
+        for (int i = 0; i < 10; i++) {
+            LLMVocabularyLearner.EndpointAccumulator e =
+                    new LLMVocabularyLearner.EndpointAccumulator("GET", "/api/endpoint" + i);
+            e.count = 1;
+            acc.put("GET /api/endpoint" + i, e);
+        }
+        java.util.List<LLMVocabularyLearner.EndpointRow> rows =
+                LLMVocabularyLearner.buildRowsFromAccumulatorPublic(acc, 3);
+        assertEquals(3, rows.size());
+    }
+
+    @Test
+    void buildRowsFromAccumulator_emptyMap_returnsEmpty() {
+        java.util.Map<String, LLMVocabularyLearner.EndpointAccumulator> acc =
+                new java.util.HashMap<>();
+        java.util.List<LLMVocabularyLearner.EndpointRow> rows =
+                LLMVocabularyLearner.buildRowsFromAccumulatorPublic(acc, 5);
+        assertTrue(rows.isEmpty());
+    }
 }

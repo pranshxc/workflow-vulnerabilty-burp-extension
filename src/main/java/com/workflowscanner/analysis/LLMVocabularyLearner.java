@@ -5,7 +5,6 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
-import com.workflowscanner.classification.EndpointKey;
 import com.workflowscanner.config.ExtensionConfig;
 import com.workflowscanner.graph.RequestGraph;
 import com.workflowscanner.graph.RequestNode;
@@ -13,14 +12,15 @@ import com.workflowscanner.llm.LLMClient;
 import com.workflowscanner.logging.ExtensionLogger;
 import com.workflowscanner.logging.LogCategory;
 import com.workflowscanner.logging.LogLevel;
+import com.workflowscanner.store.RequestStore;
+import com.workflowscanner.store.RequestSummary;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * Realism-upgrade-2 / LLM-assisted vocabulary learning.
@@ -39,8 +39,6 @@ import java.util.regex.Pattern;
  * The LLM is asked to identify the domain, not the bugs.
  */
 public class LLMVocabularyLearner {
-
-    private static final Pattern TEMPLATE_TOKEN = Pattern.compile("\\{[^}]*\\}");
 
     private final LLMClient llmClient;
     private final ExtensionConfig config;
@@ -110,55 +108,122 @@ public class LLMVocabularyLearner {
      */
     public VocabularyUpdate learnFromEndpointInventory(RequestGraph graph,
                                                        int maxEndpoints) {
-        if (graph == null) {
-            return emptyUpdate();
-        }
+        if (graph == null) return emptyUpdate();
         Map<String, RequestNode> nodes = graph.getNodes();
-        if (nodes == null || nodes.isEmpty()) {
-            return emptyUpdate();
-        }
+        if (nodes == null || nodes.isEmpty()) return emptyUpdate();
 
-        // Build a deduplicated inventory of path templates.
-        Map<String, EndpointRow> inventory = new HashMap<>();
-        int sampleBudget = 0;
+        // Issue 4: count occurrences per (method, template) so
+        // the inventory shows the most-representative endpoints
+        // first. Previously the first N unique templates were
+        // picked in arbitrary order.
+        Map<String, EndpointAccumulator> acc = new HashMap<>();
         for (RequestNode node : nodes.values()) {
-            String method = node.getMethod() == null ? "GET" : node.getMethod().toUpperCase(Locale.ROOT);
+            String method = node.getMethod() == null
+                    ? "GET" : node.getMethod().toUpperCase(Locale.ROOT);
             String path = node.getPath() == null ? "/" : node.getPath();
             String template = templatize(path);
             String key = method + " " + template;
-            EndpointRow row = inventory.computeIfAbsent(key,
-                    k -> new EndpointRow(method, template));
-            if (sampleBudget < 8 && node.getResponseData() != null
+            EndpointAccumulator e = acc.computeIfAbsent(key,
+                    k -> new EndpointAccumulator(method, template));
+            e.count++;
+            if (e.sampleResponseKeys == null && node.getResponseData() != null
                     && !node.getResponseData().isEmpty()) {
                 List<String> keys = new ArrayList<>();
                 for (String k : node.getResponseData().keySet()) {
                     if (k != null && !k.isBlank()) keys.add(k);
                 }
                 if (!keys.isEmpty()) {
-                    row.sampleResponseKeys = keys;
-                    sampleBudget++;
+                    e.sampleResponseKeys = keys;
                 }
             }
         }
+        return runInventory(buildRowsFromAccumulator(acc, maxEndpoints));
+    }
 
-        if (inventory.isEmpty()) return emptyUpdate();
-
-        // Take the most common N endpoints (here: just first N since
-        // we do not have frequency counts).
-        List<EndpointRow> rows = new ArrayList<>(inventory.values());
-        if (rows.size() > maxEndpoints) {
-            rows = rows.subList(0, maxEndpoints);
+    /**
+     * Issue 3: same as {@link #learnFromEndpointInventory} but
+     * reads from the disk-backed {@link RequestStore} instead of
+     * the hot in-memory graph. The full inventory includes
+     * older requests that may have been evicted from the hot
+     * graph; this gives the LLM a more complete picture of the
+     * target's vocabulary.
+     *
+     * <p>Uses {@link RequestStore#streamWorkflowRelevant()} so
+     * noise and static assets are not included. The stream is
+     * bounded by {@code maxSummaries} to keep memory under
+     * control on very large captures; within the bound, the
+     * top-{@code maxEndpoints} most-frequent templates are
+     * kept.
+     *
+     * <p>Safe to call with a null or empty store — returns
+     * an empty update.
+     */
+    public VocabularyUpdate learnFromRequestStore(RequestStore store,
+                                                   int maxSummaries,
+                                                   int maxEndpoints) {
+        if (store == null) return emptyUpdate();
+        // Issue 4: count occurrences and select top N.
+        Map<String, EndpointAccumulator> acc = new HashMap<>();
+        int seen = 0;
+        try (java.util.stream.Stream<RequestSummary> stream = store.streamWorkflowRelevant()) {
+            java.util.Iterator<RequestSummary> it = stream.iterator();
+            while (it.hasNext() && seen < maxSummaries) {
+                RequestSummary s = it.next();
+                if (s == null) continue;
+                seen++;
+                String method = s.getMethod() == null
+                        ? "GET" : s.getMethod().toUpperCase(Locale.ROOT);
+                String path = s.getPath() == null ? "/" : s.getPath();
+                String template = templatize(path);
+                String key = method + " " + template;
+                EndpointAccumulator e = acc.computeIfAbsent(key,
+                        k -> new EndpointAccumulator(method, template));
+                e.count++;
+            }
         }
+        return runInventory(buildRowsFromAccumulator(acc, maxEndpoints));
+    }
 
+    /**
+     * Shared inventory selection. Picks the top-N most-frequent
+     * (method, template) pairs and converts them to
+     * {@link EndpointRow} for the prompt builder.
+     */
+    public static List<EndpointRow> buildRowsFromAccumulatorPublic(
+            Map<String, EndpointAccumulator> acc, int maxEndpoints) {
+        return buildRowsFromAccumulator(acc, maxEndpoints);
+    }
+
+    private static List<EndpointRow> buildRowsFromAccumulator(
+            Map<String, EndpointAccumulator> acc, int maxEndpoints) {
+        if (acc.isEmpty()) return List.of();
+        // Sort by count desc, then by template asc (stable)
+        List<EndpointAccumulator> sorted = new ArrayList<>(acc.values());
+        sorted.sort(Comparator
+                .<EndpointAccumulator>comparingInt(a -> a.count).reversed()
+                .thenComparing(a -> a.template));
+        int n = Math.min(maxEndpoints, sorted.size());
+        List<EndpointRow> rows = new ArrayList<>(n);
+        for (int i = 0; i < n; i++) {
+            EndpointAccumulator e = sorted.get(i);
+            rows.add(new EndpointRow(e.method, e.template, e.sampleResponseKeys));
+        }
+        return rows;
+    }
+
+    /**
+     * Send the LLM the inventory and parse the response.
+     * Used by both the graph and the store overloads.
+     */
+    private VocabularyUpdate runInventory(List<EndpointRow> rows) {
+        if (rows.isEmpty()) return emptyUpdate();
         String userPrompt = buildUserPrompt(rows);
         String systemPrompt = buildSystemPrompt();
-
         String raw = llmClient.sendChatCompletion(systemPrompt, userPrompt);
         if (raw == null || raw.isBlank()) {
             log("LLM returned empty response");
             return emptyUpdate();
         }
-
         return parseResponse(raw);
     }
 
@@ -409,8 +474,25 @@ public class LLMVocabularyLearner {
     static class EndpointRow {
         final String method;
         final String template;
+        final List<String> sampleResponseKeys;
+        EndpointRow(String method, String template, List<String> sampleResponseKeys) {
+            this.method = method;
+            this.template = template;
+            this.sampleResponseKeys = sampleResponseKeys;
+        }
+    }
+
+    /**
+     * Frequency accumulator: collects a (method, template) pair
+     * and a count of how many requests hit it, plus a sample
+     * of response keys for the LLM prompt.
+     */
+    static class EndpointAccumulator {
+        final String method;
+        final String template;
+        int count = 0;
         List<String> sampleResponseKeys;
-        EndpointRow(String method, String template) {
+        EndpointAccumulator(String method, String template) {
             this.method = method;
             this.template = template;
         }

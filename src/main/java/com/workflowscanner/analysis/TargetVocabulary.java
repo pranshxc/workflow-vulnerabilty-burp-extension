@@ -96,6 +96,30 @@ public class TargetVocabulary {
                 || workflowTerms.containsKey(key);
     }
 
+    /** Return the term object for a business noun, or null. */
+    public VocabularyTerm getBusinessNoun(String term) {
+        if (term == null) return null;
+        return businessNouns.get(term.toLowerCase());
+    }
+
+    /** Return the term object for an action verb, or null. */
+    public VocabularyTerm getActionVerb(String term) {
+        if (term == null) return null;
+        return actionVerbs.get(term.toLowerCase());
+    }
+
+    /** Return the term object for a sensitive field, or null. */
+    public VocabularyTerm getSensitiveField(String term) {
+        if (term == null) return null;
+        return sensitiveFields.get(term.toLowerCase());
+    }
+
+    /** Return the term object for a workflow term, or null. */
+    public VocabularyTerm getWorkflowTerm(String term) {
+        if (term == null) return null;
+        return workflowTerms.get(term.toLowerCase());
+    }
+
     public Set<String> getBusinessNouns() {
         return Collections.unmodifiableSet(businessNouns.keySet());
     }

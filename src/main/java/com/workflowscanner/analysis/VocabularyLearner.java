@@ -73,6 +73,7 @@ public class VocabularyLearner {
     }
 
     private void loadUserVocabulary(NoiseRulesConfig nrc) {
+        // === Issue 2: USER-source terms (high trust) ===
         if (nrc.getCustomBusinessNouns() != null) {
             for (String term : nrc.getCustomBusinessNouns()) {
                 for (String normalized : TokenNormalizer.normalize(term)) {
@@ -98,6 +99,39 @@ public class VocabularyLearner {
             for (String term : nrc.getCustomWorkflowTerms()) {
                 for (String normalized : TokenNormalizer.normalize(term)) {
                     vocabulary.addWorkflowTerm(normalized, VocabularySource.USER);
+                }
+            }
+        }
+
+        // === Issue 2: LLM_INFERRED-source terms (lower trust) ===
+        // Loaded with default weight 0.5 so a hallucinated term
+        // cannot dominate scoring. The user can promote terms to
+        // USER source via the SettingsPanel.
+        if (nrc.getLlmInferredBusinessNouns() != null) {
+            for (String term : nrc.getLlmInferredBusinessNouns()) {
+                for (String normalized : TokenNormalizer.normalize(term)) {
+                    vocabulary.addBusinessNoun(normalized, VocabularySource.LLM_INFERRED);
+                }
+            }
+        }
+        if (nrc.getLlmInferredActionVerbs() != null) {
+            for (String term : nrc.getLlmInferredActionVerbs()) {
+                for (String normalized : TokenNormalizer.normalize(term)) {
+                    vocabulary.addActionVerb(normalized, VocabularySource.LLM_INFERRED);
+                }
+            }
+        }
+        if (nrc.getLlmInferredSensitiveFields() != null) {
+            for (String term : nrc.getLlmInferredSensitiveFields()) {
+                for (String normalized : TokenNormalizer.normalize(term)) {
+                    vocabulary.addSensitiveField(normalized, VocabularySource.LLM_INFERRED);
+                }
+            }
+        }
+        if (nrc.getLlmInferredWorkflowTerms() != null) {
+            for (String term : nrc.getLlmInferredWorkflowTerms()) {
+                for (String normalized : TokenNormalizer.normalize(term)) {
+                    vocabulary.addWorkflowTerm(normalized, VocabularySource.LLM_INFERRED);
                 }
             }
         }
@@ -378,6 +412,30 @@ public class VocabularyLearner {
         out.addAll(vocabulary.getActionVerbs());
         out.addAll(vocabulary.getSensitiveFields());
         out.addAll(vocabulary.getWorkflowTerms());
+        return out;
+    }
+
+    /**
+     * For tests: all terms across all four categories, with
+     * their source and weight. The returned collection is a
+     * snapshot — it is safe to iterate, but adding new terms
+     * to the learner after this call does not update the
+     * returned list.
+     */
+    public java.util.Collection<VocabularyTerm> snapshotTerms() {
+        java.util.List<VocabularyTerm> out = new java.util.ArrayList<>();
+        for (String key : vocabulary.getBusinessNouns()) {
+            out.add(vocabulary.getBusinessNoun(key));
+        }
+        for (String key : vocabulary.getActionVerbs()) {
+            out.add(vocabulary.getActionVerb(key));
+        }
+        for (String key : vocabulary.getSensitiveFields()) {
+            out.add(vocabulary.getSensitiveField(key));
+        }
+        for (String key : vocabulary.getWorkflowTerms()) {
+            out.add(vocabulary.getWorkflowTerm(key));
+        }
         return out;
     }
 }
