@@ -365,6 +365,26 @@ public class NoiseRulesConfig {
     ));
 
     // ---------------------------------------------------------------
+    // Realism-upgrade-2 / per-target user vocabulary
+    //
+    // The static seed lists above are coarse. For non-fintech
+    // targets (Airbnb, HelloFresh, healthcare, education, etc.) the
+    // user can supply their own terms in four categories. These
+    // are loaded into the TargetVocabulary at extension startup
+    // with source=USER (highest weight). Adding a term here makes
+    // the learner treat it as learned on the very first request
+    // — no traffic is required.
+    //
+    // Default values are empty: this is a pure opt-in extension
+    // point. Static seeds and learned terms still cover the
+    // common case.
+    // ---------------------------------------------------------------
+    private List<String> customBusinessNouns = Collections.emptyList();
+    private List<String> customActionVerbs = Collections.emptyList();
+    private List<String> customSensitiveFields = Collections.emptyList();
+    private List<String> customWorkflowTerms = Collections.emptyList();
+
+    // ---------------------------------------------------------------
     // Getters / setters. Lists are exposed as mutable copies so
     // tests and user overrides can append without altering the
     // shared defaults. Use {@link #withDefaults()} to get a
@@ -485,6 +505,42 @@ public class NoiseRulesConfig {
 
     public void setWorkflowStateKeywords(List<String> v) {
         this.workflowStateKeywords = v != null ? Collections.unmodifiableList(new ArrayList<>(v))
+                : Collections.emptyList();
+    }
+
+    public List<String> getCustomBusinessNouns() {
+        return new ArrayList<>(customBusinessNouns);
+    }
+
+    public void setCustomBusinessNouns(List<String> v) {
+        this.customBusinessNouns = v != null ? Collections.unmodifiableList(new ArrayList<>(v))
+                : Collections.emptyList();
+    }
+
+    public List<String> getCustomActionVerbs() {
+        return new ArrayList<>(customActionVerbs);
+    }
+
+    public void setCustomActionVerbs(List<String> v) {
+        this.customActionVerbs = v != null ? Collections.unmodifiableList(new ArrayList<>(v))
+                : Collections.emptyList();
+    }
+
+    public List<String> getCustomSensitiveFields() {
+        return new ArrayList<>(customSensitiveFields);
+    }
+
+    public void setCustomSensitiveFields(List<String> v) {
+        this.customSensitiveFields = v != null ? Collections.unmodifiableList(new ArrayList<>(v))
+                : Collections.emptyList();
+    }
+
+    public List<String> getCustomWorkflowTerms() {
+        return new ArrayList<>(customWorkflowTerms);
+    }
+
+    public void setCustomWorkflowTerms(List<String> v) {
+        this.customWorkflowTerms = v != null ? Collections.unmodifiableList(new ArrayList<>(v))
                 : Collections.emptyList();
     }
 

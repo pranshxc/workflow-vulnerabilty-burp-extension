@@ -1,10 +1,12 @@
 package com.workflowscanner.analysis;
 
 import com.workflowscanner.classification.EndpointKey;
+import com.workflowscanner.classification.NoiseRulesConfig;
 import com.workflowscanner.graph.RequestNode;
 import com.workflowscanner.logging.ExtensionLogger;
 import com.workflowscanner.logging.LogCategory;
 import com.workflowscanner.logging.LogLevel;
+import com.workflowscanner.workflow.WorkflowCandidate;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -25,6 +27,15 @@ public class ApplicationModel {
     private final Map<String, ObjectType> objectIdParameters = new HashMap<>(); // "order_id" -> ORDER
     private final List<StateTransition> knownStateTransitions = new ArrayList<>();
     private final List<AuthBoundary> authBoundaries = new ArrayList<>();
+
+    // === Realism-upgrade-2: per-target vocabulary ===
+    // The vocabulary learner observes each request node and each
+    // confirmed workflow candidate, extracts domain-specific terms
+    // (business nouns, action verbs, sensitive fields, workflow
+    // terms), and stores them in a thread-safe TargetVocabulary.
+    // The scorer reads the vocabulary to add structural boosts;
+    // the LLM prompt builder reads it for app-context rendering.
+    private final VocabularyLearner vocabularyLearner;
 
     public enum ObjectType {
         USER, ACCOUNT, ORDER, CART, PAYMENT, INVOICE, PRODUCT, ORGANIZATION, ROLE, FILE, UNKNOWN
@@ -54,6 +65,20 @@ public class ApplicationModel {
 
     public void addEndpoint(EndpointKey key) {
         if (key != null) discoveredEndpoints.add(key);
+    }
+
+    /**
+     * Construct an ApplicationModel. The {@code noiseConfig} is used
+     * by the embedded VocabularyLearner to filter noise and to load
+     * user-supplied custom vocabulary terms.
+     */
+    public ApplicationModel(NoiseRulesConfig noiseConfig) {
+        this.vocabularyLearner = new VocabularyLearner(noiseConfig);
+    }
+
+    /** Default-constructed model with stock noise rules. */
+    public ApplicationModel() {
+        this(NoiseRulesConfig.withDefaults());
     }
 
     public void addObjectIdParameter(String paramName, ObjectType type) {
@@ -119,6 +144,7 @@ public class ApplicationModel {
     /**
      * Build application model context from a list of nodes in a candidate.
      * Learns endpoints per-node, then infers state transitions from adjacent pairs.
+     * Also feeds the per-target vocabulary learner.
      */
     public void learnFromCandidate(List<RequestNode> steps) {
         if (steps == null || steps.isEmpty()) return;
@@ -147,6 +173,15 @@ public class ApplicationModel {
                 addAuthBoundary(node.getMethod() + " " + (node.getPath() != null ? node.getPath() : ""),
                         node.getStatusCode() >= 200 && node.getStatusCode() < 300);
             }
+
+            // === Realism-upgrade-2: per-target vocabulary ===
+            // Observe this request node for vocabulary learning. The
+            // learner filters out noise / static / unauth GETs; only
+            // auth-bound, state-changing, or workflow-relevant
+            // requests contribute.
+            if (vocabularyLearner != null) {
+                vocabularyLearner.observe(node);
+            }
         }
 
         // Phase 2: infer adjacent state transitions from consecutive step pairs
@@ -155,6 +190,32 @@ public class ApplicationModel {
             RequestNode curr = steps.get(i);
             inferTransition(prev, curr);
         }
+    }
+
+    /**
+     * Observe a confirmed workflow candidate. Same as
+     * {@link #learnFromCandidate(List)} but signals the
+     * candidate-level context to the vocabulary learner (which
+     * otherwise observes one node at a time). Confirmed candidates
+     * carry higher trust than raw traffic.
+     */
+    public void learnFromConfirmedCandidate(WorkflowCandidate candidate) {
+        if (candidate == null) return;
+        learnFromCandidate(candidate.getSteps());
+        if (vocabularyLearner != null) {
+            vocabularyLearner.observe(candidate);
+        }
+    }
+
+    /**
+     * Get the current snapshot of the target vocabulary. The
+     * returned object is thread-safe and is updated as new
+     * requests are observed.
+     */
+    public TargetVocabulary getTargetVocabulary() {
+        return vocabularyLearner != null
+                ? vocabularyLearner.snapshot()
+                : new TargetVocabulary();
     }
 
     /**
@@ -254,6 +315,20 @@ public class ApplicationModel {
                     sb.append("- ").append(b.endpoint)
                             .append(b.authenticated ? " (authenticated)" : " (unauthenticated)")
                             .append("\n"));
+        }
+
+        // === Realism-upgrade-2: per-target vocabulary ===
+        // The learned vocabulary (and user-supplied terms) tell the
+        // LLM what this application's domain is. For non-fintech
+        // targets (Airbnb-like, HelloFresh-like, healthcare, etc.)
+        // the LLM would otherwise have to guess the domain from
+        // paths and bodies alone.
+        if (vocabularyLearner != null) {
+            String vocabCtx = vocabularyLearner.snapshot().toPromptContext();
+            if (vocabCtx != null && !vocabCtx.startsWith("(no target")) {
+                sb.append("\nTarget vocabulary (learned from this app):\n");
+                sb.append(vocabCtx);
+            }
         }
 
         return sb.toString();

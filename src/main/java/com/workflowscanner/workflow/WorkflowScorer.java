@@ -1,6 +1,11 @@
 package com.workflowscanner.workflow;
 
+import com.workflowscanner.analysis.ApplicationModel;
+import com.workflowscanner.analysis.TargetVocabulary;
+import com.workflowscanner.analysis.TokenNormalizer;
 import com.workflowscanner.classification.BusinessKeywordRules;
+import com.workflowscanner.classification.NoiseRulesConfig;
+import com.workflowscanner.classification.PrivateContextDetector;
 import com.workflowscanner.classification.RequestIntent;
 import com.workflowscanner.classification.RequestClassification;
 import com.workflowscanner.config.ExtensionConfig;
@@ -27,6 +32,16 @@ public class WorkflowScorer {
         this.config = config;
     }
 
+    // === Realism-upgrade-2: vocabulary-aware scoring ===
+    // Optional ApplicationModel for vocabulary-based score boosts.
+    // The scorer can be constructed without one (legacy behavior
+    // preserved) — all vocabulary methods null-check.
+    private volatile ApplicationModel applicationModel;
+
+    public void setApplicationModel(ApplicationModel model) {
+        this.applicationModel = model;
+    }
+
     /**
      * Score a workflow candidate and populate evidence breakdown.
      */
@@ -44,12 +59,47 @@ public class WorkflowScorer {
         double objectFlowScore = scoreObjectFlows(candidate);
         double diversityScore = scoreMethodDiversity(steps);
         double structuralScore = scoreStructuralSignals(steps, edges);
+        // === Critical-workflow-type bonus ===
+        // A single-step candidate for a known critical workflow
+        // type (CHECKOUT, AUTHENTICATION, PAYMENT, etc.) used to
+        // score 18.0 (5.0 + 7.0 + 2.0 + 4.0) — below the 20.0
+        // analysis threshold. The workflow type itself is a strong
+        // signal: even without an explicit edge, a confirmed
+        // POST /api/checkout deserves analysis. Add +5.0 to push
+        // single-step critical types over the threshold. Multi-step
+        // critical candidates already score well above 20.0 so
+        // this is a soft bonus, not a gate.
+        double criticalTypeBonus = scoreCriticalTypeBonus(candidate);
+        // === Phase-1: structural-interest boost ===
+        // Unknown authenticated state-changing flows have no keyword
+        // match, so they score very low on the keyword axis. Without
+        // a boost, they sit at ~11.0 (state-change 5.0 + diversity 2.0
+        // + structural 4.0), below the default analysis threshold of
+        // 20.0. This makes them never reach the LLM, even though
+        // they are exactly the candidates Phase-1 is supposed to
+        // surface. The boost is gated on the same conditions as the
+        // gate's (4.5) branch: UNKNOWN_BUSINESS_FLOW + auth-bound
+        // + state-changing. 10 points gets a typical candidate over
+        // the 20.0 threshold and is small enough not to disturb
+        // keyword-driven candidates (which already score >>20).
+        double unknownFlowBoost = scoreUnknownAuthStateChanging(candidate);
+        // === Realism-upgrade-2: vocabulary-based boost ===
+        // For each step, look up path-segment tokens in the learned
+        // target vocabulary. A match against a USER-supplied term
+        // weights 8.0, against a LEARNED business noun 3.0, against
+        // an action verb 5.0, against a sensitive field 8.0. The
+        // boost is capped at 15.0 per candidate so a coincidental
+        // match in a single term does not dominate scoring.
+        double vocabularyScore = scoreVocabulary(steps);
 
         score += stateChangeScore;
         score += keywordScore;
         score += objectFlowScore;
         score += diversityScore;
         score += structuralScore;
+        score += criticalTypeBonus;
+        score += unknownFlowBoost;
+        score += vocabularyScore;
 
         // Negative signals (penalties)
         double penaltyScore = penalizeStaticContent(steps);
@@ -65,8 +115,130 @@ public class WorkflowScorer {
         if (objectFlowScore > 0) evidence.addObjectFlow(String.format("score:object-flows=%.1f", objectFlowScore));
         if (diversityScore > 0) evidence.addObjectFlow(String.format("score:diversity=%.1f", diversityScore));
         if (structuralScore > 0) evidence.addObjectFlow(String.format("score:structural=%.1f", structuralScore));
+        if (criticalTypeBonus > 0) evidence.addObjectFlow(String.format("score:critical-type=%.1f", criticalTypeBonus));
+        if (unknownFlowBoost > 0) evidence.addObjectFlow(String.format("score:unknown-flow-boost=%.1f", unknownFlowBoost));
+        if (vocabularyScore > 0) evidence.addObjectFlow(String.format("score:vocabulary=%.1f", vocabularyScore));
         if (penaltyScore > 0) evidence.addObjectFlow(String.format("score:penalties=-%.1f", penaltyScore));
         evidence.setConfidence(Math.min(1.0, score / 100.0));
+
+        return score;
+    }
+
+    private double scoreCriticalTypeBonus(WorkflowCandidate candidate) {
+        if (candidate == null) return 0.0;
+        WorkflowType t = candidate.getWorkflowType();
+        if (t == null) return 0.0;
+        switch (t) {
+            case AUTHENTICATION:
+            case PASSWORD_RESET:
+            case CHECKOUT:
+            case PAYMENT:
+            case TRANSFER:
+            case ROLE_ADMIN:
+            case APPROVAL:
+            case INVITATION:
+            case FILE_UPLOAD:
+                return 5.0;
+            default:
+                return 0.0;
+        }
+    }
+
+    /**
+     * Phase-1 structural-interest boost. Returns 10.0 for
+     * UNKNOWN_BUSINESS_FLOW + auth-bound + state-changing
+     * candidates, 0.0 otherwise. The boost is small enough not to
+     * override keyword-driven candidates (which already score
+     * >>20) and large enough to push a typical unknown auth POST
+     * over the default analysis threshold.
+     */
+    private double scoreUnknownAuthStateChanging(WorkflowCandidate candidate) {
+        if (candidate == null) return 0.0;
+        if (candidate.getWorkflowType() != WorkflowType.UNKNOWN_BUSINESS_FLOW) {
+            return 0.0;
+        }
+        List<RequestNode> steps = candidate.getSteps();
+        if (steps == null || steps.isEmpty()) return 0.0;
+
+        boolean hasStateChanging = steps.stream().anyMatch(n -> {
+            String m = n.getMethod() == null ? "" : n.getMethod().toUpperCase();
+            return "POST".equals(m) || "PUT".equals(m)
+                    || "PATCH".equals(m) || "DELETE".equals(m);
+        });
+        if (!hasStateChanging) return 0.0;
+
+        NoiseRulesConfig nrc = config != null && config.getNoiseRules() != null
+                ? config.getNoiseRules()
+                : NoiseRulesConfig.withDefaults();
+        PrivateContextDetector pcd = new PrivateContextDetector(nrc);
+        if (!pcd.chainHasPrivateContext(steps)) return 0.0;
+
+        return 10.0;
+    }
+
+    /**
+     * Realism-upgrade-2: per-target vocabulary boost. Scans each
+     * step's path and parameters against the target vocabulary
+     * (learned from traffic + user-supplied). User terms weight
+     * more than learned; sensitive fields weight more than nouns;
+     * verbs weight more than nouns. Total capped at 15.0 per
+     * candidate so a coincidental match does not dominate.
+     */
+    private double scoreVocabulary(List<RequestNode> steps) {
+        if (applicationModel == null || steps == null || steps.isEmpty()) return 0.0;
+        TargetVocabulary vocab = applicationModel.getTargetVocabulary();
+        if (vocab == null || vocab.size() == 0) return 0.0;
+
+        double total = 0.0;
+        for (RequestNode node : steps) {
+            total += scoreVocabularyForNode(node, vocab);
+        }
+        return Math.min(15.0, total);
+    }
+
+    private double scoreVocabularyForNode(RequestNode node, TargetVocabulary vocab) {
+        if (node == null) return 0.0;
+        double score = 0.0;
+
+        // Path tokens
+        String path = node.getPath();
+        if (path != null) {
+            for (String token : TokenNormalizer.normalizePath(path)) {
+                if (token.isEmpty()) continue;
+                if (vocab.containsActionVerb(token)) {
+                    score += 5.0;
+                } else if (vocab.containsBusinessNoun(token)) {
+                    score += 3.0;
+                } else if (vocab.containsWorkflowTerm(token)) {
+                    score += 1.0;
+                }
+            }
+        }
+
+        // Parameter / JSON-key tokens (sensitive fields)
+        java.util.Map<String, Object> params = node.getExtractedParams();
+        if (params != null) {
+            for (String key : params.keySet()) {
+                if (key == null) continue;
+                String cleanKey = key.startsWith("param.") ? key.substring(6) : key;
+                for (String token : TokenNormalizer.normalize(cleanKey)) {
+                    if (vocab.containsSensitiveField(token)) {
+                        score += 8.0;
+                    }
+                }
+            }
+        }
+        java.util.Map<String, Object> respData = node.getResponseData();
+        if (respData != null) {
+            for (String key : respData.keySet()) {
+                if (key == null) continue;
+                for (String token : TokenNormalizer.normalize(key)) {
+                    if (vocab.containsSensitiveField(token)) {
+                        score += 8.0;
+                    }
+                }
+            }
+        }
 
         return score;
     }

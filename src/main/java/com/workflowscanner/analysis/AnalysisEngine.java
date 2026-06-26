@@ -201,7 +201,7 @@ public class AnalysisEngine {
             List<WorkflowCandidate> analysisCandidates = candidates.stream()
                     .filter(c -> c.getWorkflowScore() >= analysisThreshold)
                     .filter(c -> analyzeReadOnly
-                            || !isLowSignalReadOnly(c))
+                            || !isLowSignalReadOnly(c, config))
                     .toList();
 
             if (analysisCandidates.isEmpty()) {
@@ -604,7 +604,7 @@ public class AnalysisEngine {
      * somehow surfaces a non-read-only method, an all-public-data
      * candidate is a low-signal hypothesis.
      */
-    private static boolean isLowSignalReadOnly(WorkflowCandidate c) {
+    private static boolean isLowSignalReadOnly(WorkflowCandidate c, ExtensionConfig config) {
         if (c == null || c.getSteps() == null || c.getSteps().isEmpty()) {
             return false;
         }
@@ -629,12 +629,24 @@ public class AnalysisEngine {
         // We do NOT require the classification — at the
         // candidate-build step the per-request intent may not have
         // been set yet. Path-based check is sufficient.
+        //
+        // === Bug fix: use configured rules, not defaults ===
+        // Previously this instantiated NoiseRulesConfig.withDefaults()
+        // directly, ignoring the user's customizations. Users who
+        // added custom public-resource patterns (e.g. for an
+        // industry-specific catalog path) would have those patterns
+        // honored by the gate's SUPPRESS_PUBLIC_RESOURCE branch but
+        // not by the analysis-side low-signal filter. The two paths
+        // are now in agreement.
         boolean allPublicResource = c.getSteps().stream().allMatch(n -> {
             String path = n.getPath();
             if (path == null) return false;
+            com.workflowscanner.classification.NoiseRulesConfig nrc =
+                    config != null && config.getNoiseRules() != null
+                            ? config.getNoiseRules()
+                            : com.workflowscanner.classification.NoiseRulesConfig.withDefaults();
             com.workflowscanner.classification.StaticNoiseRules rules =
-                    new com.workflowscanner.classification.StaticNoiseRules(
-                            com.workflowscanner.classification.NoiseRulesConfig.withDefaults());
+                    new com.workflowscanner.classification.StaticNoiseRules(nrc);
             return rules.isPublicResourcePath(path);
         });
         if (allPublicResource) return true;
