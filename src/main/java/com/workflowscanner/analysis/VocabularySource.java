@@ -18,7 +18,10 @@ public enum VocabularySource {
     LEARNED(0.7),
 
     /** User-supplied via NoiseRulesConfig.custom* fields. */
-    USER(1.0);
+    USER(1.0),
+
+    /** Inferred by the LLM from the endpoint inventory. */
+    LLM_INFERRED(0.5);
 
     private final double defaultWeight;
 

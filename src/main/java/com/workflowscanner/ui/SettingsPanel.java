@@ -57,6 +57,13 @@ public class SettingsPanel extends JPanel {
     private JTextArea scopePatternsArea;
     private JLabel scopeMatchLabel;
 
+    // Vocabulary fields (Realism-upgrade-2 user-supplied terms)
+    private JTextArea vocabNounsArea;
+    private JTextArea vocabVerbsArea;
+    private JTextArea vocabSensitiveArea;
+    private JTextArea vocabWorkflowArea;
+    private JLabel vocabStatusLabel;
+
     // Analysis fields
     private JComboBox<Integer> concurrencyCombo;
     private JCheckBox autoAnalyzeCheck;
@@ -104,6 +111,8 @@ public class SettingsPanel extends JPanel {
         content.add(createBackfillSection());
         content.add(Box.createVerticalStrut(10));
         content.add(createScopeSection());
+        content.add(Box.createVerticalStrut(10));
+        content.add(createVocabularySection());
         content.add(Box.createVerticalStrut(10));
         content.add(createAnalysisSection());
         content.add(Box.createVerticalStrut(15));
@@ -283,6 +292,220 @@ public class SettingsPanel extends JPanel {
         return panel;
     }
 
+    /**
+     * Realism-upgrade-2 / Target Vocabulary. Four text areas,
+     * one per category, plus import/export and an LLM-inference
+     * button. Saved into NoiseRulesConfig.custom* fields which
+     * VocabularyLearner normalizes at load time.
+     */
+    private JPanel createVocabularySection() {
+        JPanel panel = new JPanel(new BorderLayout(5, 5));
+        panel.setBorder(BorderFactory.createTitledBorder(
+                BorderFactory.createEtchedBorder(), "Target Vocabulary",
+                TitledBorder.LEFT, TitledBorder.TOP));
+
+        // 2x2 grid of labeled text areas
+        JPanel grid = new JPanel(new GridLayout(2, 2, 5, 5));
+        grid.add(buildVocabArea("Business nouns (one per line)",
+                "booking, reservation, guest, host, listing, payout, beneficiary, mandate, case, prescription, course",
+                area -> vocabNounsArea = area));
+        grid.add(buildVocabArea("Action verbs (one per line)",
+                "cancel, approve, publish, sign, submit, transfer, reserve, redeem, ship, enroll",
+                area -> vocabVerbsArea = area));
+        grid.add(buildVocabArea("Sensitive fields (one per line)",
+                "payout_account, delivery_address, tenant_id, beneficiary_id, ssn, tax_id, dob, prescription",
+                area -> vocabSensitiveArea = area));
+        grid.add(buildVocabArea("Other workflow terms (one per line)",
+                "step, stage, phase, wizard, enrollment, batch, cohort",
+                area -> vocabWorkflowArea = area));
+        panel.add(grid, BorderLayout.CENTER);
+
+        JPanel btnPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 3));
+        JButton clearBtn = new JButton("Clear All");
+        clearBtn.addActionListener(e -> {
+            vocabNounsArea.setText("");
+            vocabVerbsArea.setText("");
+            vocabSensitiveArea.setText("");
+            vocabWorkflowArea.setText("");
+        });
+        btnPanel.add(clearBtn);
+
+        JButton exportBtn = new JButton("Export to Clipboard");
+        exportBtn.setToolTipText("Copy the current vocabulary as JSON to the clipboard");
+        exportBtn.addActionListener(e -> exportVocabularyToClipboard());
+        btnPanel.add(exportBtn);
+
+        JButton importBtn = new JButton("Import from Clipboard");
+        importBtn.setToolTipText("Replace the current vocabulary from a JSON object on the clipboard");
+        importBtn.addActionListener(e -> importVocabularyFromClipboard());
+        btnPanel.add(importBtn);
+
+        JButton learnBtn = new JButton("Learn from LLM");
+        learnBtn.setToolTipText("Ask the configured LLM to infer business objects, "
+                + "actions, and sensitive fields from the current endpoint inventory");
+        learnBtn.addActionListener(e -> learnVocabularyFromLLM());
+        btnPanel.add(learnBtn);
+
+        vocabStatusLabel = new JLabel(" ");
+        btnPanel.add(vocabStatusLabel);
+        panel.add(btnPanel, BorderLayout.SOUTH);
+
+        panel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 320));
+        return panel;
+    }
+
+    private JPanel buildVocabArea(String label, String tooltip,
+                                   java.util.function.Consumer<JTextArea> setter) {
+        JPanel p = new JPanel(new BorderLayout(2, 2));
+        JLabel l = new JLabel(label);
+        l.setFont(l.getFont().deriveFont(Font.PLAIN, 11f));
+        p.add(l, BorderLayout.NORTH);
+        JTextArea area = new JTextArea(4, 30);
+        area.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 11));
+        area.setToolTipText(tooltip);
+        area.setLineWrap(true);
+        area.setWrapStyleWord(true);
+        JScrollPane sp = new JScrollPane(area);
+        sp.setPreferredSize(new Dimension(300, 80));
+        p.add(sp, BorderLayout.CENTER);
+        setter.accept(area);
+        return p;
+    }
+
+    /**
+     * Export the current vocabulary as a JSON object on the
+     * system clipboard. Format:
+     * <pre>
+     * {
+     *   "customBusinessNouns": [...],
+     *   "customActionVerbs": [...],
+     *   "customSensitiveFields": [...],
+     *   "customWorkflowTerms": [...]
+     * }
+     * </pre>
+     */
+    private void exportVocabularyToClipboard() {
+        try {
+            java.util.Map<String, Object> payload = new java.util.LinkedHashMap<>();
+            payload.put("customBusinessNouns", parseVocabArea(vocabNounsArea));
+            payload.put("customActionVerbs", parseVocabArea(vocabVerbsArea));
+            payload.put("customSensitiveFields", parseVocabArea(vocabSensitiveArea));
+            payload.put("customWorkflowTerms", parseVocabArea(vocabWorkflowArea));
+            String json = new com.google.gson.GsonBuilder().setPrettyPrinting().create().toJson(payload);
+            java.awt.datatransfer.StringSelection sel = new java.awt.datatransfer.StringSelection(json);
+            java.awt.Toolkit.getDefaultToolkit().getSystemClipboard().setContents(sel, null);
+            setVocabStatus("Exported to clipboard (" + json.length() + " bytes)");
+        } catch (Exception e) {
+            setVocabStatus("Export failed: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Replace the current vocabulary from a JSON object on the
+     * clipboard. The JSON must contain any of the four
+     * custom* keys; missing keys leave the corresponding field
+     * unchanged.
+     */
+    private void importVocabularyFromClipboard() {
+        try {
+            String json = (String) java.awt.Toolkit.getDefaultToolkit()
+                    .getSystemClipboard().getContents(null)
+                    .getTransferData(java.awt.datatransfer.DataFlavor.stringFlavor);
+            if (json == null || json.isBlank()) {
+                setVocabStatus("Clipboard is empty");
+                return;
+            }
+            com.google.gson.JsonObject obj = com.google.gson.JsonParser.parseString(json).getAsJsonObject();
+            if (obj.has("customBusinessNouns")) {
+                vocabNounsArea.setText(joinList(obj.getAsJsonArray("customBusinessNouns")));
+            }
+            if (obj.has("customActionVerbs")) {
+                vocabVerbsArea.setText(joinList(obj.getAsJsonArray("customActionVerbs")));
+            }
+            if (obj.has("customSensitiveFields")) {
+                vocabSensitiveArea.setText(joinList(obj.getAsJsonArray("customSensitiveFields")));
+            }
+            if (obj.has("customWorkflowTerms")) {
+                vocabWorkflowArea.setText(joinList(obj.getAsJsonArray("customWorkflowTerms")));
+            }
+            setVocabStatus("Imported from clipboard");
+        } catch (Exception e) {
+            setVocabStatus("Import failed: " + e.getMessage());
+        }
+    }
+
+    private static String joinList(com.google.gson.JsonArray arr) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < arr.size(); i++) {
+            if (i > 0) sb.append("\n");
+            sb.append(arr.get(i).getAsString());
+        }
+        return sb.toString();
+    }
+
+    private void learnVocabularyFromLLM() {
+        setVocabStatus("Asking LLM to infer vocabulary...");
+        // Run on a background thread so the UI does not block.
+        new Thread(() -> {
+            try {
+                com.workflowscanner.analysis.LLMVocabularyLearner learner =
+                        new com.workflowscanner.analysis.LLMVocabularyLearner(
+                                llmClient, config, logger);
+                com.workflowscanner.analysis.LLMVocabularyLearner.VocabularyUpdate update =
+                        learner.learnFromEndpointInventory(graph, 50);
+                SwingUtilities.invokeLater(() -> {
+                    if (update.isEmpty()) {
+                        setVocabStatus("LLM returned no vocabulary (endpoints empty or LLM error)");
+                        return;
+                    }
+                    // Merge into the visible text areas, preserving user edits.
+                    mergeIntoArea(vocabNounsArea, update.businessNouns);
+                    mergeIntoArea(vocabVerbsArea, update.actionVerbs);
+                    mergeIntoArea(vocabSensitiveArea, update.sensitiveFields);
+                    mergeIntoArea(vocabWorkflowArea, update.workflowTerms);
+                    setVocabStatus("LLM added " + update.size() + " terms");
+                });
+            } catch (Exception e) {
+                SwingUtilities.invokeLater(() ->
+                        setVocabStatus("LLM vocab learning failed: " + e.getMessage()));
+            }
+        }, "llm-vocab-learner").start();
+    }
+
+    private static void mergeIntoArea(JTextArea area, java.util.List<String> newTerms) {
+        if (newTerms == null || newTerms.isEmpty()) return;
+        java.util.Set<String> existing = new java.util.HashSet<>(
+                Arrays.asList(area.getText().split("\\s*\\n\\s*")));
+        existing.remove("");
+        StringBuilder sb = new StringBuilder(area.getText());
+        int added = 0;
+        for (String term : newTerms) {
+            if (term == null || term.isBlank()) continue;
+            String t = term.trim();
+            if (existing.add(t.toLowerCase())) {
+                if (sb.length() > 0 && sb.charAt(sb.length() - 1) != '\n') {
+                    sb.append("\n");
+                }
+                sb.append(t);
+                added++;
+            }
+        }
+        if (added > 0) area.setText(sb.toString());
+    }
+
+    private void setVocabStatus(String msg) {
+        vocabStatusLabel.setText(" " + msg);
+    }
+
+    private static List<String> parseVocabArea(JTextArea area) {
+        if (area == null) return List.of();
+        return Arrays.stream(area.getText().split("\\s*\\n\\s*"))
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .distinct()
+                .collect(Collectors.toList());
+    }
+
     private JPanel createAnalysisSection() {
         JPanel panel = new JPanel(new GridBagLayout());
         panel.setBorder(BorderFactory.createTitledBorder(
@@ -378,6 +601,15 @@ public class SettingsPanel extends JPanel {
         String patterns = String.join("\n", config.getScopeFilterPatterns());
         scopePatternsArea.setText(patterns);
 
+        // Load vocabulary
+        com.workflowscanner.classification.NoiseRulesConfig nrc = config.getNoiseRules();
+        if (nrc != null) {
+            vocabNounsArea.setText(String.join("\n", nrc.getCustomBusinessNouns()));
+            vocabVerbsArea.setText(String.join("\n", nrc.getCustomActionVerbs()));
+            vocabSensitiveArea.setText(String.join("\n", nrc.getCustomSensitiveFields()));
+            vocabWorkflowArea.setText(String.join("\n", nrc.getCustomWorkflowTerms()));
+        }
+
         concurrencyCombo.setSelectedItem(config.getAnalysisConcurrency());
         autoAnalyzeCheck.setSelected(config.isAutoAnalyzeNewChains());
 
@@ -403,6 +635,15 @@ public class SettingsPanel extends JPanel {
                 .filter(s -> !s.isEmpty())
                 .collect(Collectors.toList());
         config.setScopeFilterPatterns(patterns);
+
+        // Save vocabulary
+        com.workflowscanner.classification.NoiseRulesConfig nrc = config.getNoiseRules();
+        if (nrc != null) {
+            nrc.setCustomBusinessNouns(parseVocabArea(vocabNounsArea));
+            nrc.setCustomActionVerbs(parseVocabArea(vocabVerbsArea));
+            nrc.setCustomSensitiveFields(parseVocabArea(vocabSensitiveArea));
+            nrc.setCustomWorkflowTerms(parseVocabArea(vocabWorkflowArea));
+        }
 
         config.setAnalysisConcurrency((Integer) concurrencyCombo.getSelectedItem());
         config.setAutoAnalyzeNewChains(autoAnalyzeCheck.isSelected());

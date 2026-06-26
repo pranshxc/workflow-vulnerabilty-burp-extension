@@ -100,7 +100,8 @@ public final class TokenNormalizer {
 
     /**
      * Convenience: extract path-segment tokens from a URL path.
-     * Skips the leading slash and empty segments.
+     * Skips the leading slash, empty segments, and segments that
+     * look like object identifiers (numeric, UUID, long hex).
      */
     public static List<String> normalizePath(String path) {
         if (path == null) return List.of();
@@ -108,9 +109,89 @@ public final class TokenNormalizer {
         for (String seg : path.split("/")) {
             if (seg.isEmpty()) continue;
             if (isNumeric(seg)) continue;
+            if (looksLikeId(seg)) continue;
             out.addAll(normalize(seg));
         }
         return out;
+    }
+
+    /**
+     * Return true if a path segment looks like an object
+     * identifier — the kind of token that should mark the
+     * boundary between an object collection path and the
+     * resource/action tail, and should be skipped during
+     * vocabulary extraction.
+     *
+     * <p>Recognized: numeric, UUID (8-4-4-4-12 hex), long hex
+     * (10+ hex chars), mixed alphanumeric IDs (8+ chars with
+     * both letters and digits), slug (3+ dash-separated
+     * lowercase parts), case-style ID (e.g. CASE-123).
+     */
+    public static boolean looksLikeId(String seg) {
+        if (seg == null || seg.isEmpty()) return false;
+        if (isNumeric(seg)) return true;
+        if (seg.length() == 36 && seg.charAt(8) == '-'
+                && seg.charAt(13) == '-' && seg.charAt(18) == '-'
+                && seg.charAt(23) == '-') {
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < seg.length(); i++) {
+                char c = seg.charAt(i);
+                if (c == '-') continue;
+                sb.append(c);
+            }
+            if (isHex(sb.toString())) return true;
+        }
+        if (seg.length() >= 10) {
+            if (isHex(seg)) return true;
+        }
+        if (seg.length() >= 8 && !seg.contains("-") && !seg.contains("_")) {
+            boolean hasLetter = false, hasDigit = false;
+            for (int i = 0; i < seg.length(); i++) {
+                char c = seg.charAt(i);
+                if (Character.isLetter(c)) hasLetter = true;
+                else if (Character.isDigit(c)) hasDigit = true;
+                else { hasLetter = false; hasDigit = false; break; }
+            }
+            if (hasLetter && hasDigit) return true;
+        }
+        if (seg.contains("-") && seg.length() >= 6) {
+            String[] parts = seg.split("-");
+            if (parts.length >= 3) {
+                boolean allLower = true;
+                for (String p : parts) {
+                    if (p.isEmpty()) { allLower = false; break; }
+                    for (int i = 0; i < p.length(); i++) {
+                        char c = p.charAt(i);
+                        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))) {
+                            allLower = false; break;
+                        }
+                    }
+                    if (!allLower) break;
+                }
+                if (allLower) return true;
+            }
+        }
+        if (seg.contains("-")) {
+            boolean hasUpper = false, hasDigit = false;
+            for (int i = 0; i < seg.length(); i++) {
+                char c = seg.charAt(i);
+                if (c == '-') continue;
+                if (Character.isUpperCase(c)) hasUpper = true;
+                else if (Character.isDigit(c)) hasDigit = true;
+            }
+            if (hasUpper && hasDigit) return true;
+        }
+        return false;
+    }
+
+    private static boolean isHex(String s) {
+        if (s == null || s.isEmpty()) return false;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
+                    || (c >= 'A' && c <= 'F'))) return false;
+        }
+        return true;
     }
 
     /** Last segment of a path, normalized. */

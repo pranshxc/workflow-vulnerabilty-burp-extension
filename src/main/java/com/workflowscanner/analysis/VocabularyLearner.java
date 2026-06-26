@@ -209,7 +209,7 @@ public class VocabularyLearner {
         for (int i = 0; i < segs.length; i++) {
             String seg = segs[i];
             if (seg.isEmpty()) continue;
-            if (isSegmentNumeric(seg)) return tokIdx;
+            if (isSegmentId(seg)) return tokIdx;
             // Only count segments that survive normalization
             List<String> norm = TokenNormalizer.normalize(seg);
             if (!norm.isEmpty()) tokIdx++;
@@ -217,10 +217,114 @@ public class VocabularyLearner {
         return -1;
     }
 
+    /**
+     * Return true if a path segment looks like an object
+     * identifier — the kind of token that should mark the
+     * boundary between an object collection path and the
+     * action tail. Recognized forms:
+     *
+     * <ul>
+     *   <li>pure numeric: 123, 4567890</li>
+     *   <li>UUID: 550e8400-e29b-41d4-a716-446655440000</li>
+     *   <li>long hex: abc123def456 (10+ hex chars)</li>
+     *   <li>slug: lowercase-with-dashes (3+ dash-separated parts)</li>
+     *   <li>mixed alphanumeric ID: a1b2c3d4 (8+ chars, both letters and digits)</li>
+     *   <li>case-style ID: ABC-123-XYZ, CASE-456</li>
+     * </ul>
+     *
+     * <p>Conservative: a segment that is a real word (e.g. "case",
+     * "policy", "user") does NOT match even if it has digits. This
+     * avoids misclassifying "case123" as an ID; it just becomes a
+     * businessNoun by position.
+     */
+    static boolean isSegmentId(String seg) {
+        if (seg == null || seg.isEmpty()) return false;
+        if (isSegmentNumeric(seg)) return true;
+        // UUID: 8-4-4-4-12 hex with dashes
+        if (seg.length() == 36 && seg.charAt(8) == '-'
+                && seg.charAt(13) == '-' && seg.charAt(18) == '-'
+                && seg.charAt(23) == '-') {
+            return isHexWithDashes(seg);
+        }
+        // Long hex (10+ chars, all [0-9a-f])
+        if (seg.length() >= 10 && isHex(seg)) return true;
+        // Mixed alphanumeric ID: 8+ chars, both letters and digits,
+        // no dashes or underscores. "abc12345" matches, "case" doesn't.
+        if (seg.length() >= 8 && !seg.contains("-") && !seg.contains("_")
+                && hasLetters(seg) && hasDigits(seg)) {
+            return true;
+        }
+        // Slug: 3+ dash-separated parts, all lowercase letters
+        // "my-cool-slug", "annual-report-2024"
+        if (seg.contains("-") && seg.length() >= 6) {
+            String[] parts = seg.split("-");
+            if (parts.length >= 3 && isLowercaseSlugParts(parts)) {
+                return true;
+            }
+        }
+        // Case-style ID: "CASE-123", "ABC-123-XYZ"
+        if (seg.contains("-") && hasUppercase(seg) && hasDigits(seg)) {
+            return true;
+        }
+        return false;
+    }
+
     private static boolean isSegmentNumeric(String seg) {
         if (seg == null || seg.isEmpty()) return false;
         for (int i = 0; i < seg.length(); i++) {
             if (!Character.isDigit(seg.charAt(i))) return false;
+        }
+        return true;
+    }
+
+    private static boolean isHex(String s) {
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
+                    || (c >= 'A' && c <= 'F'))) return false;
+        }
+        return true;
+    }
+
+    private static boolean isHexWithDashes(String s) {
+        // strip dashes then check hex
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '-') continue;
+            sb.append(c);
+        }
+        return isHex(sb.toString());
+    }
+
+    private static boolean hasLetters(String s) {
+        for (int i = 0; i < s.length(); i++) {
+            if (Character.isLetter(s.charAt(i))) return true;
+        }
+        return false;
+    }
+
+    private static boolean hasDigits(String s) {
+        for (int i = 0; i < s.length(); i++) {
+            if (Character.isDigit(s.charAt(i))) return true;
+        }
+        return false;
+    }
+
+    private static boolean hasUppercase(String s) {
+        for (int i = 0; i < s.length(); i++) {
+            if (Character.isUpperCase(s.charAt(i))) return true;
+        }
+        return false;
+    }
+
+    private static boolean isLowercaseSlugParts(String[] parts) {
+        for (String p : parts) {
+            if (p.isEmpty()) return false;
+            for (int i = 0; i < p.length(); i++) {
+                char c = p.charAt(i);
+                if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))) return false;
+            }
         }
         return true;
     }
