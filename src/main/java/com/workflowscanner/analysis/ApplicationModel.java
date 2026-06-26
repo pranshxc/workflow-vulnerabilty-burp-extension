@@ -142,6 +142,24 @@ public class ApplicationModel {
     }
 
     /**
+     * Observe a single request node for per-target vocabulary
+     * learning. No-op for noise / non-workflow requests so the
+     * vocabulary does not get polluted with telemetry, static
+     * assets, or public-data lookups.
+     *
+     * <p>Use this for incremental learning in the GraphBuilder
+     * (each new request is observed as it enters the graph) so
+     * vocabulary accumulates across analysis runs. Inside the
+     * detection pipeline, {@link #learnFromCandidate(List)} is
+     * preferred because it carries the candidate context.
+     */
+    public void observeNode(RequestNode node) {
+        if (vocabularyLearner != null) {
+            vocabularyLearner.observe(node);
+        }
+    }
+
+    /**
      * Build application model context from a list of nodes in a candidate.
      * Learns endpoints per-node, then infers state transitions from adjacent pairs.
      * Also feeds the per-target vocabulary learner.

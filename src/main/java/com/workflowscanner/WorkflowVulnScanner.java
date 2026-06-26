@@ -328,6 +328,17 @@ public class WorkflowVulnScanner implements BurpExtension {
                 workflowDetector.setGraphContext(graph, graphBuilder.getDetector());
             }
 
+            // === Realism-upgrade-2 wiring ===
+            // Forward the application model to the detector so the
+            // scorer can use the target vocabulary (learned + user-
+            // supplied) for score boosts. The detector also calls
+            // applicationModel.observeNode(...) on each candidate's
+            // steps right before scoring, so vocabulary terms are
+            // populated in time for the boost to take effect.
+            if (applicationModel != null) {
+                workflowDetector.setApplicationModel(applicationModel);
+            }
+
             this.analysisEngine = new AnalysisEngine(graph, llmClient, config, logger);
             analysisEngine.setWorkflowDetector(workflowDetector);
             if (applicationModel != null) {

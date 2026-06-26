@@ -1,13 +1,16 @@
 package com.workflowscanner.workflow;
 
+import com.workflowscanner.analysis.ApplicationModel;
 import com.workflowscanner.classification.EdgeStrength;
+import com.workflowscanner.classification.EndpointKey;
 import com.workflowscanner.classification.RequestClassification;
+import com.workflowscanner.classification.RequestIntent;
 import com.workflowscanner.config.ExtensionConfig;
 import com.workflowscanner.graph.EdgeType;
+import com.workflowscanner.graph.RelationshipDetector;
 import com.workflowscanner.graph.RequestEdge;
 import com.workflowscanner.graph.RequestGraph;
 import com.workflowscanner.graph.RequestNode;
-import com.workflowscanner.graph.RelationshipDetector;
 import com.workflowscanner.logging.ExtensionLogger;
 import com.workflowscanner.logging.LogCategory;
 import com.workflowscanner.logging.LogLevel;
@@ -19,6 +22,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
+import java.util.stream.Collectors;
 import java.util.stream.Collectors;
 
 /**
@@ -42,6 +46,18 @@ public class WorkflowDetector {
     private final ExtensionLogger logger;
     private final List<Consumer<WorkflowCandidate>> candidateListeners = new ArrayList<>();
     private List<WorkflowCandidate> lastResults = new ArrayList<>();
+
+    // === Realism-upgrade-2 wiring ===
+    // The scorer reads ApplicationModel.getTargetVocabulary() to add
+    // vocabulary-based score boosts. To make those boosts take effect
+    // for the FIRST scoring pass, vocabulary must be learned BEFORE
+    // scoring — which we do in detectInternal() by observing each
+    // candidate's steps right after edge attachment.
+    //
+    // The model is shared with GraphBuilder (incremental learning
+    // between runs) and the LLM prompt context (so the LLM sees the
+    // learned domain). It is set once at startup.
+    private volatile ApplicationModel applicationModel;
 
     // Live candidate metrics updated by BOTH preview and full-detect
     // paths. The status panel reads this; it should never be stale
@@ -228,6 +244,29 @@ public class WorkflowDetector {
         // 5. Attach supporting edges within each candidate
         for (WorkflowCandidate candidate : merged) {
             attachSupportingEdges(candidate, graph, detector);
+        }
+
+        // 5.5 === Realism-upgrade-2 wiring ===
+        //     Observe each candidate's steps into the application
+        //     model BEFORE scoring. This populates the target
+        //     vocabulary with terms from the very candidates being
+        //     scored, so vocabulary boosts (configured via
+        //     NoiseRulesConfig.customBusinessNouns etc., or learned
+        //     from earlier analysis runs) actually take effect.
+        //
+        //     Without this step, WorkflowScorer.scoreVocabulary
+        //     sees the vocabulary but its terms were only the
+        //     user-supplied ones at construction time — anything
+        //     learned from traffic would be one run behind.
+        if (applicationModel != null) {
+            for (WorkflowCandidate candidate : merged) {
+                List<RequestNode> steps = candidate.getSteps();
+                if (steps != null) {
+                    for (RequestNode node : steps) {
+                        applicationModel.observeNode(node);
+                    }
+                }
+            }
         }
 
         // 6. Score once — after all merging and edge attachment
@@ -913,4 +952,36 @@ public class WorkflowDetector {
     public WorkflowSessionizer getSessionizer() { return sessionizer; }
     public WorkflowScorer getScorer() { return scorer; }
     public List<WorkflowCandidate> getLastResults() { return lastResults; }
+
+    /**
+     * Wire the per-target ApplicationModel into the detection
+     * pipeline. The model is forwarded to the scorer so vocabulary
+     * matches in the path / parameters add a +3 / +5 / +8 score
+     * contribution (capped at 15.0 per candidate).
+     *
+     * <p>Called once from {@code WorkflowVulnScanner.initAnalysisEngine}
+     * after the model has been created. After this call, every
+     * {@code detectInternal} run will:
+     * <ol>
+     *   <li>segment and merge candidates,</li>
+     *   <li>attach supporting edges,</li>
+     *   <li>observe each candidate's steps into the model (so the
+     *       learned vocabulary reflects the very candidates being
+     *       scored),</li>
+     *   <li>score using both static rules AND the populated
+     *       vocabulary.</li>
+     * </ol>
+     *
+     * <p>Without this wiring, vocabulary boosts silently return
+     * zero and the analyzer misses terms like "reservation",
+     * "beneficiary", "listing" on non-fintech targets.
+     */
+    public void setApplicationModel(ApplicationModel model) {
+        this.applicationModel = model;
+        if (scorer != null) {
+            scorer.setApplicationModel(model);
+        }
+    }
+
+    public ApplicationModel getApplicationModel() { return applicationModel; }
 }

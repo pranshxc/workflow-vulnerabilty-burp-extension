@@ -42,6 +42,8 @@ public class WorkflowScorer {
         this.applicationModel = model;
     }
 
+    public ApplicationModel getApplicationModel() { return applicationModel; }
+
     /**
      * Score a workflow candidate and populate evidence breakdown.
      */

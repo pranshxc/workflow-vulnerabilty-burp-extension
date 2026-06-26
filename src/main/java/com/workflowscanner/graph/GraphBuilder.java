@@ -343,6 +343,18 @@ public class GraphBuilder {
             graph.addNode(node);
             nodesProcessed.incrementAndGet();
 
+            // 6b. === Realism-upgrade-2 incremental vocabulary ===
+            //     Observe the new node into the application model
+            //     so vocabulary accumulates across analysis runs.
+            //     The candidate-level observation in WorkflowDetector
+            //     still happens right before scoring, but by then
+            //     the model already has the historical vocabulary
+            //     from prior runs, so boosts apply on the first
+            //     pass for terms the target uses repeatedly.
+            if (applicationModel != null) {
+                applicationModel.observeNode(node);
+            }
+
             // Track by intent type
             switch (classification.getIntent()) {
                 case BUSINESS_ACTION: businessActionCount.incrementAndGet(); break;
